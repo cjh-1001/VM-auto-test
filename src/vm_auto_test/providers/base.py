@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-
 from collections.abc import Callable
 
 from vm_auto_test.models import CommandResult, GuestCredentials, Shell, StepResult
+
+
+class VmToolsNotReadyError(Exception):
+    """VMware Tools 未就绪，请检查 VM 中是否已安装 VMware Tools。"""
 
 
 class VmwareProvider(ABC):
@@ -26,6 +29,11 @@ class VmwareProvider(ABC):
 
     @abstractmethod
     async def reset_vm(self, vm_id: str) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def verify_guest_credentials(self, vm_id: str, credentials: GuestCredentials) -> str:
+        """Test guest credentials. Returns "ok" on success, raises on failure."""
         raise NotImplementedError
 
     @abstractmethod

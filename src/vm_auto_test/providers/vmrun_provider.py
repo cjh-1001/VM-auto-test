@@ -8,7 +8,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from vm_auto_test.models import CommandResult, GuestCredentials, Shell, StepResult
-from vm_auto_test.providers.base import VmwareProvider
+from vm_auto_test.providers.base import VmToolsNotReadyError, VmwareProvider
 from vmware_mcp.vmrun import VMRun
 
 _LOGGER = logging.getLogger(__name__)
@@ -115,6 +115,16 @@ class VmrunProvider(VmwareProvider):
     async def reset_vm(self, vm_id: str) -> None:
         await self._vmrun.reset(vm_id, hard=False)
 
+    async def verify_guest_credentials(self, vm_id: str, credentials: GuestCredentials) -> str:
+        await self._vmrun.list_processes(
+            vm_id,
+            user=credentials.user,
+            password=credentials.password,
+        )
+        return "ok"
+
+    _MAX_CONSECUTIVE_FAILURES = 5
+
     async def wait_guest_ready(
         self,
         vm_id: str,
@@ -125,6 +135,8 @@ class VmrunProvider(VmwareProvider):
         deadline = time.monotonic() + timeout_seconds
         last_reason = "guest_ready_unknown_timeout"
         attempt = 1
+        tools_state_failures = 0
+        guest_auth_failures = 0
         while time.monotonic() < deadline:
             try:
                 self._emit_progress(progress, "check_vmware_tools", "started", f"attempt {attempt}")
@@ -133,6 +145,7 @@ class VmrunProvider(VmwareProvider):
                     last_reason = "tools_not_running"
                     self._emit_progress(progress, "check_vmware_tools", "failed", last_reason)
                 else:
+                    tools_state_failures = 0
                     self._emit_progress(progress, "check_vmware_tools", "passed", "running")
                     self._emit_progress(progress, "guest_process_check", "started", f"attempt {attempt}")
                     try:
@@ -141,15 +154,29 @@ class VmrunProvider(VmwareProvider):
                             user=credentials.user,
                             password=credentials.password,
                         )
-                    except RuntimeError:
-                        last_reason = "guest_auth_or_process_check_failed"
+                    except RuntimeError as exc:
+                        last_reason = f"guest_auth_or_process_check_failed: {exc}"
                         self._emit_progress(progress, "guest_process_check", "failed", last_reason)
+                        guest_auth_failures += 1
+                        if guest_auth_failures >= self._MAX_CONSECUTIVE_FAILURES:
+                            raise VmToolsNotReadyError(
+                                f"连续 {guest_auth_failures} 次 Guest 认证失败，"
+                                f"请确认 Guest 用户名和密码正确。\n"
+                                f"最后一次错误: {exc}"
+                            )
                     else:
                         self._emit_progress(progress, "guest_process_check", "passed", "authenticated")
                         return
-            except RuntimeError:
-                last_reason = "tools_state_check_failed"
+            except RuntimeError as exc:
+                last_reason = f"tools_state_check_failed: {exc}"
                 self._emit_progress(progress, "check_vmware_tools", "failed", last_reason)
+                tools_state_failures += 1
+                if tools_state_failures >= self._MAX_CONSECUTIVE_FAILURES:
+                    raise VmToolsNotReadyError(
+                        f"连续 {tools_state_failures} 次检查 VMware Tools 状态失败，"
+                        f"请确认 VM 中已安装 VMware Tools。\n"
+                        f"最后一次错误: {exc}"
+                    )
             attempt += 1
             remaining_seconds = deadline - time.monotonic()
             if remaining_seconds <= 0:

@@ -28,6 +28,9 @@ class FakeProvider(VmwareProvider):
     async def reset_vm(self, vm_id: str) -> None:
         self.commands.append("reset")
 
+    async def verify_guest_credentials(self, vm_id: str, credentials: GuestCredentials) -> str:
+        return "ok"
+
     async def wait_guest_ready(
         self,
         vm_id: str,

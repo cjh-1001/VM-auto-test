@@ -1,6 +1,6 @@
 # VM Auto Test
 
-面向本地授权 VMware Workstation 实验环境的自动化验证框架——回滚快照 → 执行样本 → 采集结果 → 生成报告，串成稳定可重复的测试流程。
+面向本地 VMware Workstation 实验环境的自动化验证框架——回滚快照 → 执行样本 → 采集结果 → 生成报告，串成稳定可重复的测试流程。
 
 **只做自动化执行和结果比对，不生成样本、不提供绕过能力、不尝试规避检测。**
 
@@ -31,10 +31,21 @@ pip install -e .[dev]
 
 ```bash
 copy .env.example .env
-vm-auto-test --env-file .env
 ```
 
-首次运行会自动进入环境配置向导，按提示填好 vmrun 路径和 guest 凭据即可。之后每次直接进主菜单：
+编辑 `.env`，填入你的 vmrun 路径：
+
+```bash
+VMRUN_PATH=D:\VM2\vmrun.exe
+```
+
+然后启动：
+
+```bash
+vm-auto-test
+```
+
+首次运行会进入主菜单：
 
 ```
   —— VM Auto Test ——
@@ -47,6 +58,28 @@ vm-auto-test --env-file .env
 ```
 
 全程逐步引导，不需要记参数。
+
+### 配置 Guest 凭证
+
+不再在 `.env` 中配置全局用户名密码。每个 VM 的凭证独立管理：
+
+1. 主菜单选 **[3] 列出 VM**
+2. 选择要配置的 VM
+3. 选 `[1] 配置凭证`，输入该 VM 的 Guest 用户名密码
+4. 保存后自动验证，成功即完成
+
+凭证保存在 `credentials.json`（按 VM 文件名匹配）：
+
+```json
+{
+  "Windows 11 x64": {
+    "user": "19657",
+    "password": "admin123"
+  }
+}
+```
+
+已配置的 VM 在列表中会标注 `[已配置]`。也可以 `[1] 验证凭证` 测试现有配置是否有效，或 `[2] 重新配置` 修改。
 
 ### CSV 表格格式（多样本测试）
 
@@ -70,7 +103,7 @@ Excel 编辑，4 列，保存为 **CSV UTF-8**：
 | 未拦截 / `AV_NOT_BLOCKED` | 杀软没拦住，攻击效果发生 |
 | 已拦截 / `AV_BLOCKED_OR_NO_CHANGE` | 杀软拦截或未生效 |
 
-报告在 `reports/时间戳-batch/` 下，每个样本一个子目录。
+报告在 `reports/时间戳-样本名/` 下，每个样本一个子目录。
 
 ## 两种测试模式
 
@@ -83,21 +116,14 @@ AV 模式必须先有一份已通过的 baseline 报告。
 
 ## 报告目录
 
-多样本运行：
-
-```text
+```
 reports/
-└── 20260508-120000-000000-batch/
+└── 20260509-023223-336747-1-A_schtasks/
     ├── result.json          # 汇总
-    └── samples/
-        ├── 1-A_schtasks/
-        │   ├── result.json
-        │   ├── before.txt
-        │   ├── after.txt
-        │   ├── sample_stdout.txt
-        │   └── sample_stderr.txt
-        └── 2-A_data/
-            └── ...
+    ├── before.txt           # 样本执行前验证命令输出
+    ├── after.txt            # 样本执行后验证命令输出
+    ├── sample_stdout.txt    # 样本 stdout
+    └── sample_stderr.txt    # 样本 stderr
 ```
 
 ## 命令行参考
@@ -107,11 +133,27 @@ reports/
 | 命令 | 用途 |
 |---|---|
 | `vm-auto-test` | 交互菜单 |
+| `vm-auto-test run --vm ... --sample ... --verify ...` | 单样本测试 |
 | `vm-auto-test run-csv --csv ...` | CSV 批量测试 |
 | `vm-auto-test run-dir --dir ...` | 扫描目录批量测试 |
-| `vm-auto-test run ...` | 单样本临时验证 |
 | `vm-auto-test vms` | 列出运行中的 VM |
 | `vm-auto-test snapshots --vm ...` | 列出快照 |
+
+## 测试流程
+
+每次单样本测试按以下步骤执行：
+
+| 步骤 | 说明 |
+|------|------|
+| `create report dir` | 创建报告目录 |
+| `revert snapshot` | 回滚到指定快照 |
+| `start vm` | 启动 VM |
+| `wait guest ready` | 等待 VMware Tools 就绪 + 验证 Guest 凭证（5 次失败自动终止） |
+| `before verification` | 执行验证命令，获取 baseline |
+| `run sample` | 在 Guest 中执行测试样本 |
+| `after verification` | 再次执行验证命令，获取结果 |
+| `evaluate` | 比对前后输出，判定有效/无效 |
+| `write report` | 生成报告文件 |
 
 ## 输出比较策略
 
@@ -121,7 +163,7 @@ reports/
 |---|---|---|
 | `changed` | 归一化后前后不同 | 默认，无需配置 |
 | `contains` | 输出包含指定字符串 | `value: "created"` |
-| `regex` | 输出匹配正则 | `pattern: "Error: \d+"` |
+| `regex` | 输出匹配正则 | `pattern: "Error: \\d+"` |
 | `json_field` | JSON 字段等于预期值 | `path: "result.status"`, `expected: "ok"` |
 | `file_hash` | 输出 SHA-256 等于预期 | `expected: "abc123..."` |
 
@@ -138,6 +180,39 @@ av_logs:
       shell: powershell
 ```
 
+## 配置文件
+
+### .env — 全局环境变量
+
+```bash
+# vmrun.exe 路径
+VMRUN_PATH=D:\VM2\vmrun.exe
+
+# VM 凭证文件路径（可选，默认 credentials.json）
+VMWARE_CREDENTIALS_FILE=credentials.json
+
+# vmrest/MCP 配置（可选）
+VMWARE_HOST=localhost
+VMWARE_PORT=8697
+```
+
+### credentials.json — 按 VM 配置凭证
+
+```json
+{
+  "Windows 11 x64": {
+    "user": "19657",
+    "password": "admin123"
+  },
+  "Win10": {
+    "user": "admin",
+    "password": "pass456"
+  }
+}
+```
+
+Key 为 `.vmx` 文件名去掉路径和扩展名。可通过主菜单 [3] 交互式添加、验证、重新配置。
+
 ## Provider
 
 | provider | 状态 |
@@ -152,19 +227,12 @@ pytest
 python -m compileall -q src tests
 ```
 
-当前 86 个测试，使用 fake provider，不需要真实 VMware 环境。
+当前 88 个测试，使用 fake provider，不需要真实 VMware 环境。
 
 ### 真实 VMware smoke test
 
-```dotenv
-# .env 里加上这些
-VM_AUTO_TEST_SMOKE_VM_ID=F:\VMs\Win10\Win10.vmx
-VM_AUTO_TEST_SMOKE_SNAPSHOT=clean-base
-VMWARE_GUEST_USER=Administrator
-VMWARE_GUEST_PASSWORD=your_password
-```
-
 ```bash
+# .env 里配置 VMRUN_PATH 和 credentials.json 即可
 vm-auto-test-smoke
 ```
 
@@ -179,14 +247,14 @@ src/
     ├── av_logs.py           # AV 日志采集接口
     ├── cli.py               # 命令行入口 + 交互菜单
     ├── config.py            # YAML/CSV 配置解析
-    ├── env.py               # .env 加载
+    ├── env.py               # .env 加载 + 凭证管理
     ├── evaluator.py         # 输出归一化和比较策略
     ├── models.py            # 数据模型
     ├── orchestrator.py      # 测试流程编排
     ├── reporting.py         # 报告生成
     ├── smoke.py             # 真实 VMware smoke test
     └── providers/
-        ├── base.py          # Provider 抽象
+        ├── base.py          # Provider 抽象 + 异常定义
         ├── factory.py       # Provider 工厂
         └── vmrun_provider.py# VMware Workstation vmrun provider
 
@@ -199,4 +267,4 @@ tests/                       # fake provider 离线测试
 - 使用隔离网络或 Host-only/NAT
 - 每次测试前回滚到明确快照
 - 不在生产主机或共享环境中运行未知样本
-- Guest 密码写入 `.env` 文件，不要提交到 git
+- Guest 密码写入 `credentials.json`，`.env` 和 `credentials.json` 都不要提交到 git

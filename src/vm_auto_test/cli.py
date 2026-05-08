@@ -22,7 +22,14 @@ from vm_auto_test.config import (
     to_test_case,
     write_config,
 )
-from vm_auto_test.env import is_env_configured, load_env_file, load_optional_env_file
+from vm_auto_test.env import (
+    is_env_configured,
+    load_credentials_store,
+    load_env_file,
+    load_optional_env_file,
+    resolve_guest_credentials,
+    upsert_vm_credentials,
+)
 from vm_auto_test.models import (
     ComparisonSpec,
     GuestCredentials,
@@ -34,7 +41,7 @@ from vm_auto_test.models import (
     VerificationSpec,
 )
 from vm_auto_test.orchestrator import TestOrchestrator
-from vm_auto_test.providers.base import VmwareProvider
+from vm_auto_test.providers.base import VmToolsNotReadyError, VmwareProvider
 from vm_auto_test.providers.factory import create_provider
 
 _BACK = object()
@@ -136,7 +143,7 @@ async def main_async() -> None:
             print(f"  {exc}")
             return
         if not snapshots:
-            print("  没有找到快照")
+            print("  没有找到快照，请先在 VMware Workstation 中为该 VM 创建快照")
             return
         for index, snapshot in enumerate(snapshots, start=1):
             print(f"  [{index}] {snapshot}")
@@ -153,16 +160,21 @@ async def main_async() -> None:
         if not snapshot:
             snapshots_list = await run_dir_orchestrator.list_snapshots(vm_id)
             if not snapshots_list:
-                raise RuntimeError("没有找到快照，请确认 VM 已开机且装有 VMware Tools")
+                raise RuntimeError("没有找到快照，请先在 VMware Workstation 中为该 VM 创建快照")
             snapshot = choose_from_list(snapshots_list, "选择快照")
             if snapshot is None:
                 print("已取消")
                 return
 
-        guest_user = args.guest_user or os.getenv("VMWARE_GUEST_USER", "") or input("Guest user: ")
-        guest_password = args.guest_password or os.getenv("VMWARE_GUEST_PASSWORD")
-        if guest_password is None:
-            guest_password = getpass.getpass("Guest password: ")
+        creds = resolve_guest_credentials(vm_id)
+        if creds:
+            guest_user = creds.user
+            guest_password = creds.password
+        else:
+            guest_user = args.guest_user or input("Guest user: ")
+            guest_password = args.guest_password
+            if guest_password is None:
+                guest_password = getpass.getpass("Guest password: ")
 
         sample_specs = tuple(
             SampleSpec(id=cfg.id, command=cfg.command, shell=cfg.shell)
@@ -201,16 +213,21 @@ async def main_async() -> None:
         if not snapshot:
             snapshots_list = await csv_orchestrator.list_snapshots(vm_id)
             if not snapshots_list:
-                raise RuntimeError("没有找到快照，请确认 VM 已开机且装有 VMware Tools")
+                raise RuntimeError("没有找到快照，请先在 VMware Workstation 中为该 VM 创建快照")
             snapshot = choose_from_list(snapshots_list, "选择快照")
             if snapshot is None:
                 print("已取消")
                 return
 
-        guest_user = args.guest_user or os.getenv("VMWARE_GUEST_USER", "") or input("Guest user: ")
-        guest_password = args.guest_password or os.getenv("VMWARE_GUEST_PASSWORD")
-        if guest_password is None:
-            guest_password = getpass.getpass("Guest password: ")
+        creds = resolve_guest_credentials(vm_id)
+        if creds:
+            guest_user = creds.user
+            guest_password = creds.password
+        else:
+            guest_user = args.guest_user or input("Guest user: ")
+            guest_password = args.guest_password
+            if guest_password is None:
+                guest_password = getpass.getpass("Guest password: ")
 
         sample_specs: list[SampleSpec] = []
         for cfg in sample_configs:
@@ -275,16 +292,21 @@ async def main_async() -> None:
     if not snapshot:
         snapshots = await orchestrator.list_snapshots(vm_id)
         if not snapshots:
-            raise RuntimeError("没有找到快照，请确认 VM 已开机且装有 VMware Tools")
+            raise RuntimeError("没有找到快照，请先在 VMware Workstation 中为该 VM 创建快照")
         snapshot = choose_from_list(snapshots, "选择快照")
         if snapshot is None:
             print("已取消")
             return
 
-    guest_user = args.guest_user or os.getenv("VMWARE_GUEST_USER", "") or input("Guest user: ")
-    guest_password = args.guest_password or os.getenv("VMWARE_GUEST_PASSWORD")
-    if guest_password is None:
-        guest_password = getpass.getpass("Guest password: ")
+    creds = resolve_guest_credentials(vm_id)
+    if creds:
+        guest_user = creds.user
+        guest_password = creds.password
+    else:
+        guest_user = args.guest_user or input("Guest user: ")
+        guest_password = args.guest_password
+        if guest_password is None:
+            guest_password = getpass.getpass("Guest password: ")
 
     test_case = TestCase(
         vm_id=vm_id,
@@ -324,12 +346,7 @@ async def _interactive_menu(provider: VmwareProvider, env_file: Path) -> None:
             continue
 
         if choice == "3":
-            vms = await provider.list_running_vms()
-            if not vms:
-                print("  没有运行中的 VM")
-            else:
-                for i, vm in enumerate(vms, 1):
-                    print(f"  [{i}] {vm}")
+            await _interactive_list_vms(provider)
             continue
 
         if choice == "4":
@@ -342,7 +359,7 @@ async def _interactive_menu(provider: VmwareProvider, env_file: Path) -> None:
                 print(f"  {exc}")
                 continue
             if not snapshots:
-                print("  没有找到快照")
+                print("  没有找到快照，请先在 VMware Workstation 中为该 VM 创建快照")
             else:
                 for i, s in enumerate(snapshots, 1):
                     print(f"  [{i}] {s}")
@@ -363,6 +380,91 @@ def _prompt_back(prompt: str) -> str | None:
     if value.lower() == "b":
         return None
     return value
+
+
+async def _interactive_list_vms(provider: VmwareProvider) -> None:
+    vms = await provider.list_running_vms()
+    if not vms:
+        print("  没有运行中的 VM")
+        return
+    for i, vm in enumerate(vms, 1):
+        store = load_credentials_store()
+        stem = Path(vm).stem
+        tag = "  [已配置]" if stem in store else ""
+        print(f"  [{i}] {vm}{tag}")
+
+    print("\n  —— 选择 VM ——")
+    result = choose_from_list(vms, "选择 VM")
+    if result is None or result is _BACK:
+        return
+    vm_id = result
+    stem = Path(vm_id).stem
+
+    while True:
+        store = load_credentials_store()
+        if stem in store:
+            entry = store[stem]
+            credentials = GuestCredentials(entry["user"], entry["password"])
+            print(f"\n  VM: {stem}")
+            print(f"  已配置凭证: {credentials.user}")
+            print("  [0] 返回")
+            print("  [1] 验证凭证")
+            print("  [2] 重新配置")
+            choice = input("\n  > ").strip()
+            if choice == "0":
+                return
+            if choice == "1":
+                pass  # verify below
+            elif choice == "2":
+                credentials = _prompt_vm_credentials(vm_id)
+                if credentials is None:
+                    continue
+            else:
+                continue
+        else:
+            print(f"\n  VM: {stem}")
+            print("  该 VM 未配置凭证")
+            print("  [0] 返回")
+            print("  [1] 配置凭证")
+            choice = input("\n  > ").strip()
+            if choice == "0":
+                return
+            if choice == "1":
+                credentials = _prompt_vm_credentials(vm_id)
+                if credentials is None:
+                    continue
+            else:
+                continue
+
+        print(f"\n  正在验证 {credentials.user}@{stem} ...")
+        try:
+            await provider.verify_guest_credentials(vm_id, credentials)
+            print("  凭证验证成功 ✓")
+            if stem not in load_credentials_store():
+                upsert_vm_credentials(vm_id, credentials.user, credentials.password)
+                print(f"  已保存到 {os.getenv('VMWARE_CREDENTIALS_FILE', 'credentials.json')}")
+        except Exception as exc:
+            print(f"  凭证验证失败: {exc}")
+            print("  请重新配置凭证。")
+
+
+def _prompt_vm_credentials(vm_id: str) -> GuestCredentials | None:
+    """Prompt for VM credentials and save to store."""
+    print()
+    guest_user = input("  Guest 用户名: ").strip()
+    if not guest_user:
+        print("  已取消")
+        return None
+    guest_password = getpass.getpass("  Guest 密码: ")
+    if not guest_password:
+        print("  已取消")
+        return None
+    credentials = GuestCredentials(guest_user, guest_password)
+    save = input("  保存到配置文件? [Y/n]: ").strip().lower()
+    if save != "n":
+        upsert_vm_credentials(vm_id, guest_user, guest_password)
+        print(f"  已保存到 {os.getenv('VMWARE_CREDENTIALS_FILE', 'credentials.json')}")
+    return credentials
 
 
 async def _interactive_single(provider: VmwareProvider) -> None:
@@ -410,7 +512,7 @@ async def _interactive_single(provider: VmwareProvider) -> None:
                 step = 0
                 continue
             if not snapshots:
-                print("  没有找到快照，请确认 VM 已开机且装有 VMware Tools")
+                print("  没有找到快照，请先在 VMware Workstation 中为该 VM 创建快照")
                 step = 0
                 continue
             print("\n  —— 选择快照 ——")
@@ -480,24 +582,21 @@ async def _interactive_single(provider: VmwareProvider) -> None:
         # — step 5: Guest —
         if step == 5:
             print("\n  —— Guest 凭据 ——")
-            user = os.getenv("VMWARE_GUEST_USER") or ""
-            if user:
-                print(f"  Guest 用户名 (env): {user}")
-                guest_user = user
+            creds = resolve_guest_credentials(vm_id) if vm_id else None
+            if creds:
+                print(f"  Guest 用户名: {creds.user}")
+                guest_user = creds.user
+                guest_password = creds.password
             else:
                 result = _prompt_back("Guest 用户名")
                 if result is None:
                     step = 4
                     continue
                 guest_user = result
-            pw = os.getenv("VMWARE_GUEST_PASSWORD")
-            if pw:
-                guest_password = pw
-            else:
                 guest_password = getpass.getpass("  Guest 密码: ")
-            if not guest_password:
-                print("  密码不能为空")
-                continue
+                if not guest_password:
+                    print("  密码不能为空")
+                    continue
             step = 6
             continue
 
@@ -526,7 +625,10 @@ async def _interactive_single(provider: VmwareProvider) -> None:
                 baseline_result=baseline_result,
             )
             orch = TestOrchestrator(provider, Path("reports"), progress=print_progress)
-            result = await orch.run(test_case)
+            try:
+                result = await orch.run(test_case)
+            except VmToolsNotReadyError:
+                return
             print(f"\n  {_classify_cn(result.classification)}")
             print(f"  报告: {result.report_dir}")
             return
@@ -575,7 +677,7 @@ async def _interactive_csv(provider: VmwareProvider) -> None:
                 step = 0
                 continue
             if not snapshots:
-                print("  没有找到快照，请确认 VM 已开机且装有 VMware Tools")
+                print("  没有找到快照，请先在 VMware Workstation 中为该 VM 创建快照")
                 step = 0
                 continue
             print("\n  —— 选择快照 ——")
@@ -629,24 +731,21 @@ async def _interactive_csv(provider: VmwareProvider) -> None:
         # — step 4: Guest —
         if step == 4:
             print("\n  —— Guest 凭据 ——")
-            user = os.getenv("VMWARE_GUEST_USER") or ""
-            if user:
-                print(f"  Guest 用户名 (env): {user}")
-                guest_user = user
+            creds = resolve_guest_credentials(vm_id) if vm_id else None
+            if creds:
+                print(f"  Guest 用户名: {creds.user}")
+                guest_user = creds.user
+                guest_password = creds.password
             else:
                 result = _prompt_back("Guest 用户名")
                 if result is None:
                     step = 3
                     continue
                 guest_user = result
-            pw = os.getenv("VMWARE_GUEST_PASSWORD")
-            if pw:
-                guest_password = pw
-            else:
                 guest_password = getpass.getpass("  Guest 密码: ")
-            if not guest_password:
-                print("  密码不能为空")
-                continue
+                if not guest_password:
+                    print("  密码不能为空")
+                    continue
             step = 5
             continue
 
@@ -690,7 +789,10 @@ async def _interactive_csv(provider: VmwareProvider) -> None:
                 verification=first_v or VerificationSpec(command="", shell=Shell.POWERSHELL),
             )
             orch = TestOrchestrator(provider, Path("reports"), progress=print_progress)
-            batch_result = await orch.run_batch(test_case)
+            try:
+                batch_result = await orch.run_batch(test_case)
+            except VmToolsNotReadyError:
+                return
             print(f"\n  {_classify_cn(batch_result.classification)}  ({batch_result.classification.value})  共 {len(batch_result.samples)} 个样本")
             for s in batch_result.samples:
                 print(f"    {s.sample_spec.id}  {_classify_cn(s.classification, short=True)}")
@@ -704,37 +806,63 @@ async def _interactive_setup(env_file: Path) -> None:
 
     vmrun_path = _prompt_env("vmrun.exe 路径", os.getenv("VMRUN_PATH"))
 
-    guest_user = _prompt_env("Guest 用户名", os.getenv("VMWARE_GUEST_USER"))
-
-    current_pw = os.getenv("VMWARE_GUEST_PASSWORD", "")
-    pw_display = "***" if current_pw else "(未设置)"
-    print(f"  Guest 密码  当前: {pw_display}")
-    guest_password = getpass.getpass("  新值: ").strip()
-    if not guest_password:
-        guest_password = current_pw
-
     print("\n  --- vmrest/MCP 配置 (可选) ---")
     vmware_host = _prompt_env("VMWARE_HOST", os.getenv("VMWARE_HOST"))
     vmware_port = _prompt_env("VMWARE_PORT", os.getenv("VMWARE_PORT"))
 
+    existing = load_env_file_text(env_file)
+    vmware_user = _keep_existing("VMWARE_GUEST_USER", existing)
+    vmware_password = _keep_existing("VMWARE_GUEST_PASSWORD", existing)
+    creds_file = _keep_existing("VMWARE_CREDENTIALS_FILE", existing) or "credentials.json"
+
     lines = [
         f"VMRUN_PATH={_quote_if_needed(vmrun_path)}",
-        "",
-        f"VMWARE_GUEST_USER={guest_user}",
-        f"VMWARE_GUEST_PASSWORD={guest_password}",
-        "",
-        f"VMWARE_HOST={vmware_host}",
-        f"VMWARE_PORT={vmware_port}",
     ]
+    if vmware_user:
+        lines.append(f"VMWARE_GUEST_USER={vmware_user}")
+    if vmware_password:
+        lines.append(f"VMWARE_GUEST_PASSWORD={vmware_password}")
+    lines.append("")
+    lines.append(f"VMWARE_CREDENTIALS_FILE={_quote_if_needed(creds_file)}")
+    lines.append("")
+    lines.append(f"VMWARE_HOST={vmware_host}")
+    lines.append(f"VMWARE_PORT={vmware_port}")
     env_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
     load_env_file(env_file, override=True)
     print("\n  ✓ 配置已保存\n")
+    print("  VM 独立凭证请在主菜单 [3] 列出 VM 中配置。\n")
 
 
 def _prompt_env(label: str, current: str | None) -> str:
     display = current if current else "(未设置)"
     new_value = input(f"  {label}  当前: {display}\n  新值: ").strip()
     return new_value if new_value else (current or "")
+
+
+def load_env_file_text(path: Path) -> dict[str, str]:
+    """Parse .env file into a dict, preserving existing keys."""
+    result: dict[str, str] = {}
+    if not path.exists():
+        return result
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        result[key.strip()] = _strip_quotes_env(value.strip())
+    return result
+
+
+def _keep_existing(key: str, existing: dict[str, str]) -> str:
+    return existing.get(key, "")
+
+
+def _strip_quotes_env(value: str) -> str:
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        return value[1:-1]
+    return value
 
 
 def _classify_cn(classification: Any, short: bool = False) -> str:
@@ -882,10 +1010,8 @@ def choose_value(label: str, values: list[str], default: str | None = None) -> s
 def format_cli_error(exc: Exception) -> str:
     if isinstance(exc, (ValueError, IndexError, NotImplementedError)):
         return str(exc)
-    if isinstance(exc, RuntimeError):
-        message = str(exc)
-        if message.startswith("vmrun.exe not found:") or message.startswith("无法列出快照"):
-            return message
+    if isinstance(exc, (VmToolsNotReadyError, RuntimeError)):
+        return str(exc)
     return f"{type(exc).__name__}: operation failed"
 
 

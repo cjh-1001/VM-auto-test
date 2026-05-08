@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
+
+from vm_auto_test.models import GuestCredentials
 
 
 def load_env_file(path: Path, *, override: bool = False) -> None:
@@ -38,6 +41,81 @@ def is_env_configured() -> bool:
     if not vmrun:
         return False
     return Path(vmrun).is_file() and bool(os.getenv("VMWARE_GUEST_USER", ""))
+
+
+def resolve_guest_credentials(vm_id: str) -> GuestCredentials | None:
+    """Resolve guest credentials for a VM.
+
+    Lookup order:
+    1. VMWARE_CREDENTIALS_FILE JSON, keyed by VM stem (filename without .vmx and path)
+    2. VMWARE_GUEST_USER / VMWARE_GUEST_PASSWORD env vars
+    3. Return None (caller should prompt)
+    """
+    vm_stem = Path(vm_id).stem
+    creds_file = os.getenv("VMWARE_CREDENTIALS_FILE", "")
+    if creds_file:
+        creds_path = Path(creds_file)
+        if creds_path.is_file():
+            try:
+                data = json.loads(creds_path.read_text(encoding="utf-8"))
+                entry = data.get(vm_stem) or data.get(vm_id)
+                if isinstance(entry, dict) and entry.get("user"):
+                    return GuestCredentials(
+                        user=entry["user"],
+                        password=entry.get("password", ""),
+                    )
+            except (json.JSONDecodeError, OSError):
+                pass
+
+    user = os.getenv("VMWARE_GUEST_USER", "")
+    if user:
+        return GuestCredentials(
+            user=user,
+            password=os.getenv("VMWARE_GUEST_PASSWORD", ""),
+        )
+    return None
+
+
+def _credentials_file_path() -> Path:
+    creds_file = os.getenv("VMWARE_CREDENTIALS_FILE", "")
+    if creds_file:
+        return Path(creds_file)
+    return Path("credentials.json")
+
+
+def load_credentials_store() -> dict[str, dict[str, str]]:
+    path = _credentials_file_path()
+    if path.is_file():
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {}
+
+
+def save_credentials_store(data: dict[str, dict[str, str]]) -> None:
+    path = _credentials_file_path()
+    path.write_text(
+        json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def upsert_vm_credentials(vm_id: str, user: str, password: str) -> None:
+    store = load_credentials_store()
+    stem = Path(vm_id).stem
+    store[stem] = {"user": user, "password": password}
+    save_credentials_store(store)
+
+
+def remove_vm_credentials(vm_id: str) -> bool:
+    store = load_credentials_store()
+    stem = Path(vm_id).stem
+    if stem in store:
+        del store[stem]
+        save_credentials_store(store)
+        return True
+    return False
 
 
 def _strip_quotes(value: str) -> str:

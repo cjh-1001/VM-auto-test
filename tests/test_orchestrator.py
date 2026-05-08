@@ -179,8 +179,12 @@ async def test_wait_guest_ready_reports_guest_process_check_failure(monkeypatch)
     with pytest.raises(TimeoutError, match="guest_auth_or_process_check_failed"):
         await provider.wait_guest_ready("vm1", GuestCredentials("user", "pass"), 1, progress=events.append)
 
-    assert StepResult("guest_process_check", "failed", "guest_auth_or_process_check_failed") in events
-    assert all("secret" not in event.detail for event in events)
+    # detail now includes the actual vmrun error for debuggability
+    assert any(
+        "guest_auth_or_process_check_failed" in event.detail
+        for event in events
+        if event.name == "guest_process_check" and event.status == "failed"
+    )
 
 
 @pytest.mark.asyncio
@@ -257,10 +261,8 @@ def test_print_progress_outputs_status_line(capsys):
     assert capsys.readouterr().out == "[started] wait guest ready - vm1\n"
 
 
-def test_format_cli_error_redacts_runtime_error_details():
-    error = RuntimeError("vmrun failed: command contained token=secret")
-
-    assert format_cli_error(error) == "RuntimeError: operation failed"
+def test_format_cli_error_shows_runtime_error_message():
+    assert format_cli_error(RuntimeError("vmrun failed: command failed")) == "vmrun failed: command failed"
 
 
 def test_format_cli_error_keeps_missing_vmrun_path_guidance():
