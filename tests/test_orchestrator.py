@@ -8,9 +8,13 @@ from pathlib import Path
 
 from vm_auto_test.cli import choose_snapshot, choose_value, clean_cli_value, format_cli_error, print_progress
 from vm_auto_test.evaluator import normalize_output
-from vm_auto_test.models import Classification, GuestCredentials, StepResult, TestCase, TestMode
+from vm_auto_test.models import Classification, CommandResult, GuestCredentials, Shell, StepResult, TestCase, TestMode
 from vm_auto_test.orchestrator import TestOrchestrator
-from vm_auto_test.providers.vmrun_provider import VmrunProvider
+from vm_auto_test.providers.vmrun_provider import (
+    VmrunProvider,
+    _make_cmd_wrapper,
+    _make_powershell_wrapper,
+)
 
 from conftest import FakeProvider, run_case
 
@@ -314,3 +318,258 @@ async def test_run_emits_progress_events(tmp_path):
     assert events[8].detail == "verification"
     assert events[10].detail == "sample"
     assert "C:\\Samples\\sample.exe" not in [event.detail for event in events]
+
+
+# -- script generation tests -------------------------------------------------
+
+
+def test_make_powershell_wrapper_includes_output_and_exitcode_paths():
+    script = _make_powershell_wrapper(
+        "C:\\Temp\\user.ps1",
+        "C:\\Temp\\out.txt",
+        "C:\\Temp\\ec.txt",
+    )
+    assert "C:\\Temp\\user.ps1" in script
+    assert "C:\\Temp\\out.txt" in script
+    assert "C:\\Temp\\ec.txt" in script
+    assert "$LASTEXITCODE" in script
+    assert "Out-File" in script
+
+
+def test_make_powershell_wrapper_escapes_single_quotes_in_paths():
+    script = _make_powershell_wrapper(
+        "C:\\Temp\\u'ser.ps1",
+        "C:\\Temp\\o'ut.txt",
+        "C:\\Temp\\e'c.txt",
+    )
+    assert "u''ser.ps1" in script
+    assert "o''ut.txt" in script
+    assert "e''c.txt" in script
+
+
+def test_make_cmd_wrapper_includes_output_and_exitcode_paths():
+    script = _make_cmd_wrapper(
+        "C:\\Temp\\user.bat",
+        "C:\\Temp\\out.txt",
+        "C:\\Temp\\ec.txt",
+    )
+    assert 'cmd.exe /c ""C:\\Temp\\user.bat""' in script
+    assert 'C:\\Temp\\out.txt' in script
+    assert 'C:\\Temp\\ec.txt' in script
+    assert "%ERRORLEVEL%" in script
+    assert 'echo %VM_AUTO_TEST_EXITCODE% > "C:\\Temp\\ec.txt"' in script
+    assert "2>&1" in script
+
+
+def test_make_cmd_wrapper_starts_with_echo_off():
+    script = _make_cmd_wrapper("user.bat", "out.txt", "ec.txt")
+    assert script.lstrip().startswith("@echo off")
+
+
+def test_make_cmd_wrapper_preserves_non_ascii_script_path():
+    script = _make_cmd_wrapper(
+        "C:\\临时目录\\脚本.bat",
+        "C:\\临时目录\\输出.txt",
+        "C:\\临时目录\\退出码.txt",
+    )
+    assert 'cmd.exe /c ""C:\\临时目录\\脚本.bat""' in script
+    assert '> "C:\\临时目录\\输出.txt"' in script
+    assert 'echo %VM_AUTO_TEST_EXITCODE% > "C:\\临时目录\\退出码.txt"' in script
+
+
+# -- run_guest_command integration tests ------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_run_cmd_passes_progress_and_returns_command_result():
+    """Regression test: _run_cmd no longer crashes with NameError on progress."""
+    class FakeVMRun:
+        async def create_temp_file(self, vm_id, user, password):
+            return "C:\\Temp\\vmware-temp-12345.txt"
+
+        async def copy_to_guest(self, vm_id, host_path, guest_path, user, password):
+            return "ok"
+
+        async def run_program_in_guest(self, vm_id, program, program_args, user, password):
+            return "ok"
+
+        async def copy_from_guest(self, vm_id, guest_path, host_path, user, password):
+            from pathlib import Path
+            Path(host_path).write_text("hello world", encoding="utf-8")
+            return "ok"
+
+        async def delete_file(self, vm_id, guest_path, user, password):
+            return "ok"
+
+    provider = VmrunProvider(vmrun=FakeVMRun())
+    events = []
+
+    result = await provider.run_guest_command(
+        "vm1",
+        "echo hello",
+        Shell.CMD,
+        GuestCredentials("user", "pass"),
+        30,
+        progress=events.append,
+    )
+
+    assert isinstance(result, CommandResult)
+    assert result.capture_method == "redirected_file"
+    assert any(e.name == "guest_script" for e in events)
+    assert any(e.status == "passed" for e in events)
+
+
+@pytest.mark.asyncio
+async def test_run_powershell_passes_progress():
+    class FakeVMRun:
+        async def create_temp_file(self, vm_id, user, password):
+            return "C:\\Temp\\vmware-temp-12345.txt"
+
+        async def copy_to_guest(self, vm_id, host_path, guest_path, user, password):
+            return "ok"
+
+        async def run_program_in_guest(self, vm_id, program, program_args, user, password):
+            return "ok"
+
+        async def copy_from_guest(self, vm_id, guest_path, host_path, user, password):
+            from pathlib import Path
+            if "exitcode" in guest_path:
+                Path(host_path).write_text("0", encoding="utf-8")
+            else:
+                Path(host_path).write_text("hello world", encoding="utf-8")
+            return "ok"
+
+        async def delete_file(self, vm_id, guest_path, user, password):
+            return "ok"
+
+    provider = VmrunProvider(vmrun=FakeVMRun())
+    events = []
+
+    result = await provider.run_guest_command(
+        "vm1",
+        "Get-Item C:\\marker.txt",
+        Shell.POWERSHELL,
+        GuestCredentials("user", "pass"),
+        30,
+        progress=events.append,
+    )
+
+    assert isinstance(result, CommandResult)
+    assert result.exit_code == 0
+    assert result.capture_method == "redirected_file"
+
+
+@pytest.mark.asyncio
+async def test_run_guest_command_captures_exit_code():
+    class FakeVMRun:
+        async def create_temp_file(self, vm_id, user, password):
+            return "C:\\Temp\\vmware-out.txt"
+
+        async def copy_to_guest(self, vm_id, host_path, guest_path, user, password):
+            return "ok"
+
+        async def run_program_in_guest(self, vm_id, program, program_args, user, password):
+            return "ok"
+
+        async def copy_from_guest(self, vm_id, guest_path, host_path, user, password):
+            from pathlib import Path
+            p = Path(host_path)
+            if "exitcode" in guest_path:
+                p.write_text("42", encoding="utf-8")
+            else:
+                p.write_text("output with non-zero exit", encoding="utf-8")
+            return "ok"
+
+        async def delete_file(self, vm_id, guest_path, user, password):
+            return "ok"
+
+    provider = VmrunProvider(vmrun=FakeVMRun())
+
+    result = await provider.run_guest_command(
+        "vm1",
+        "C:\\Samples\\failing.exe",
+        Shell.CMD,
+        GuestCredentials("user", "pass"),
+        30,
+    )
+
+    assert result.exit_code == 42
+    assert result.stdout == "output with non-zero exit"
+
+
+@pytest.mark.asyncio
+async def test_run_guest_command_reports_missing_exit_code():
+    class FakeVMRun:
+        async def create_temp_file(self, vm_id, user, password):
+            return "C:\\Temp\\vmware-out.txt"
+
+        async def copy_to_guest(self, vm_id, host_path, guest_path, user, password):
+            return "ok"
+
+        async def run_program_in_guest(self, vm_id, program, program_args, user, password):
+            return "ok"
+
+        async def copy_from_guest(self, vm_id, guest_path, host_path, user, password):
+            from pathlib import Path
+            if "exitcode" in guest_path:
+                raise RuntimeError("missing exitcode")
+            Path(host_path).write_text("output", encoding="utf-8")
+            return "ok"
+
+        async def delete_file(self, vm_id, guest_path, user, password):
+            return "ok"
+
+    provider = VmrunProvider(vmrun=FakeVMRun())
+
+    result = await provider.run_guest_command(
+        "vm1",
+        "echo hello",
+        Shell.CMD,
+        GuestCredentials("user", "pass"),
+        30,
+    )
+
+    assert result.exit_code == 1
+    assert "guest exit code unavailable" in result.stderr
+
+
+@pytest.mark.asyncio
+async def test_run_guest_command_cleans_all_guest_files_when_output_copy_fails():
+    class FakeVMRun:
+        def __init__(self):
+            self.deleted = []
+
+        async def create_temp_file(self, vm_id, user, password):
+            return "C:\\Temp\\vmware-out.txt"
+
+        async def copy_to_guest(self, vm_id, host_path, guest_path, user, password):
+            return "ok"
+
+        async def run_program_in_guest(self, vm_id, program, program_args, user, password):
+            return "ok"
+
+        async def copy_from_guest(self, vm_id, guest_path, host_path, user, password):
+            raise RuntimeError("copy failed")
+
+        async def delete_file(self, vm_id, guest_path, user, password):
+            self.deleted.append(guest_path)
+            return "ok"
+
+    vmrun = FakeVMRun()
+    provider = VmrunProvider(vmrun=vmrun)
+
+    with pytest.raises(RuntimeError, match="copy failed"):
+        await provider.run_guest_command(
+            "vm1",
+            "echo hello",
+            Shell.CMD,
+            GuestCredentials("user", "pass"),
+            30,
+        )
+
+    assert vmrun.deleted == [
+        "C:\\Temp\\vmware-out.txt",
+        "C:\\Temp\\vmware-out.txt.exitcode",
+        "C:\\Temp\\vmware-out.txt.user.bat",
+        "C:\\Temp\\vmware-out.txt.wrapper.bat",
+    ]

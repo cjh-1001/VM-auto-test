@@ -163,6 +163,19 @@ class VMRun:
             cmd_args.extend(args.split())
         return await self._run("runProgramInGuest", *cmd_args, guest_user=user, guest_pass=password)
 
+    async def run_program_in_guest(self, vmx_path: str, program: str, program_args: list[str] | None = None, no_wait: bool = False, active_window: bool = False, interactive: bool = False, user: str = "", password: str = "") -> str:
+        cmd_args = [vmx_path]
+        if no_wait:
+            cmd_args.append("-noWait")
+        if active_window:
+            cmd_args.append("-activeWindow")
+        if interactive:
+            cmd_args.append("-interactive")
+        cmd_args.append(program)
+        if program_args:
+            cmd_args.extend(program_args)
+        return await self._run("runProgramInGuest", *cmd_args, guest_user=user, guest_pass=password)
+
     async def run_script(self, vmx_path: str, interpreter: str, script: str, no_wait: bool = False, active_window: bool = False, interactive: bool = False, user: str = "", password: str = "") -> str:
         cmd_args = [vmx_path]
         if no_wait:

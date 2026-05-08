@@ -9,6 +9,7 @@ build/
 .venv/
 venv/
 .env
+.claude/settings.local.json
 reports/
 *-reports/
 *.report/

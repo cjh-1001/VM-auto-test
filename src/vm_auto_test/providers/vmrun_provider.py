@@ -14,6 +14,49 @@ from vmware_mcp.vmrun import VMRun
 _LOGGER = logging.getLogger(__name__)
 
 
+def _powershell_single_quoted(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _make_powershell_wrapper(user_script_path: str, output_path: str, exitcode_path: str) -> str:
+    return "\n".join(
+        [
+            "$ErrorActionPreference = 'Continue'",
+            "$userScript = " + _powershell_single_quoted(user_script_path),
+            "$outputFile = " + _powershell_single_quoted(output_path),
+            "$exitCodeFile = " + _powershell_single_quoted(exitcode_path),
+            "& $userScript *>&1 | Out-File -FilePath $outputFile -Encoding UTF8",
+            "if ($null -ne $LASTEXITCODE) { $exitCode = $LASTEXITCODE } elseif ($?) { $exitCode = 0 } else { $exitCode = 1 }",
+            "[System.IO.File]::WriteAllText($exitCodeFile, [string]$exitCode, [System.Text.Encoding]::ASCII)",
+            "exit 0",
+            "",
+        ]
+    )
+
+
+def _make_cmd_wrapper(user_script_path: str, output_path: str, exitcode_path: str) -> str:
+    return "".join(
+        [
+            "@echo off\r\n",
+            "chcp 65001 > nul\r\n",
+            "cmd.exe /c \"\"" + user_script_path + "\"\" > \"" + output_path + "\" 2>&1\r\n",
+            "set VM_AUTO_TEST_EXITCODE=%ERRORLEVEL%\r\n",
+            "echo %VM_AUTO_TEST_EXITCODE% > \"" + exitcode_path + "\"\r\n",
+            "exit /b 0\r\n",
+        ]
+    )
+
+
+def _read_exit_code(path: Path, encoding: str = "utf-8") -> int:
+    value = path.read_text(encoding=encoding, errors="replace").strip()
+    if not value:
+        raise ValueError("empty exit code")
+    try:
+        return int(value)
+    except ValueError as exc:
+        raise ValueError(f"invalid exit code: {value[:80]!r}") from exc
+
+
 class VmrunProvider(VmwareProvider):
     def __init__(self, vmrun: VMRun | None = None) -> None:
         self._vmrun = vmrun or VMRun()
@@ -121,13 +164,13 @@ class VmrunProvider(VmwareProvider):
         timeout_seconds: int,
         progress: Callable[[StepResult], None] | None,
     ) -> CommandResult:
-        quoted_command = command.replace("'", "''")
-        script = f"$ErrorActionPreference = 'Continue'; Invoke-Expression '{quoted_command}'"
-        return await self._run_script_with_file_capture(
+        return await self._run_with_file_capture(
             vm_id=vm_id,
             command=command,
+            script_ext=".ps1",
+            wrapper_maker=_make_powershell_wrapper,
             interpreter="powershell.exe",
-            script=script,
+            interpreter_args=["-ExecutionPolicy", "Bypass", "-File"],
             credentials=credentials,
             timeout_seconds=timeout_seconds,
             progress=progress,
@@ -139,75 +182,168 @@ class VmrunProvider(VmwareProvider):
         command: str,
         credentials: GuestCredentials,
         timeout_seconds: int,
+        progress: Callable[[StepResult], None] | None,
     ) -> CommandResult:
-        return await self._run_script_with_file_capture(
+        return await self._run_with_file_capture(
             vm_id=vm_id,
             command=command,
+            script_ext=".bat",
+            wrapper_maker=_make_cmd_wrapper,
             interpreter="cmd.exe",
-            script=f"/c {command}",
+            interpreter_args=["/c"],
             credentials=credentials,
             timeout_seconds=timeout_seconds,
             progress=progress,
         )
 
-    async def _run_script_with_file_capture(
+    async def _run_with_file_capture(
         self,
         vm_id: str,
         command: str,
+        script_ext: str,
+        wrapper_maker: Callable[[str, str, str], str],
         interpreter: str,
-        script: str,
+        interpreter_args: list[str],
         credentials: GuestCredentials,
         timeout_seconds: int,
+        progress: Callable[[StepResult], None] | None,
     ) -> CommandResult:
         with tempfile.TemporaryDirectory(prefix="vm-auto-test-") as temp_dir:
-            host_output = Path(temp_dir) / "guest-output.txt"
-            guest_output = await self._vmrun.create_temp_file(
+            host_dir = Path(temp_dir)
+            guest_output_path = await self._vmrun.create_temp_file(
                 vm_id,
                 user=credentials.user,
                 password=credentials.password,
             )
-            wrapped_script = self._redirect_script(interpreter, script, guest_output)
+            guest_exitcode_path = guest_output_path + ".exitcode"
+            guest_user_script_path = guest_output_path + ".user" + script_ext
+            guest_wrapper_path = guest_output_path + ".wrapper" + script_ext
+
+            host_user_script = host_dir / ("user" + script_ext)
+            host_wrapper = host_dir / ("wrapper" + script_ext)
+            script_encoding = "utf-8-sig"
+            wrapper_encoding = "utf-8-sig" if script_ext == ".ps1" else "mbcs"
+            output_encoding = "utf-8"
+            host_user_script.write_text(command + "\n", encoding=script_encoding)
+            host_wrapper.write_text(
+                wrapper_maker(guest_user_script_path, guest_output_path, guest_exitcode_path),
+                encoding=wrapper_encoding,
+            )
+
+            self._emit_progress(progress, "guest_script", "started", "copying to guest")
+            await self._copy_to_guest(vm_id, str(host_user_script), guest_user_script_path, credentials)
+            await self._copy_to_guest(vm_id, str(host_wrapper), guest_wrapper_path, credentials)
+
+            host_output = host_dir / "guest-output.txt"
+            host_exitcode = host_dir / "guest-exitcode.txt"
+
             try:
+                self._emit_progress(progress, "guest_script", "started", "executing")
                 await asyncio.wait_for(
-                    self._vmrun.run_script(
+                    self._vmrun.run_program_in_guest(
                         vm_id,
                         interpreter,
-                        wrapped_script,
+                        program_args=[*interpreter_args, guest_wrapper_path],
                         user=credentials.user,
                         password=credentials.password,
                     ),
                     timeout=timeout_seconds,
                 )
-                await self._vmrun.copy_from_guest(
+
+                self._emit_progress(progress, "guest_script", "started", "retrieving output")
+                await self._copy_from_guest(vm_id, guest_output_path, host_output, credentials)
+                exit_code, stderr = await self._copy_exit_code(
                     vm_id,
-                    guest_output,
-                    str(host_output),
-                    user=credentials.user,
-                    password=credentials.password,
+                    guest_exitcode_path,
+                    host_exitcode,
+                    credentials,
+                    output_encoding,
                 )
-                stdout = host_output.read_text(encoding="utf-8", errors="replace")
+
+                stdout = host_output.read_text(encoding=output_encoding, errors="replace")
+                self._emit_progress(progress, "guest_script", "passed", "completed")
                 return CommandResult(
                     command=command,
                     stdout=stdout,
+                    stderr=stderr,
+                    exit_code=exit_code,
                     capture_method="redirected_file",
                 )
             finally:
-                try:
-                    await self._vmrun.delete_file(
-                        vm_id,
-                        guest_output,
-                        user=credentials.user,
-                        password=credentials.password,
-                    )
-                except RuntimeError as exc:
-                    _LOGGER.warning("Guest temp output cleanup failed: %s", type(exc).__name__)
+                await self._cleanup_guest_files(
+                    vm_id,
+                    [
+                        guest_output_path,
+                        guest_exitcode_path,
+                        guest_user_script_path,
+                        guest_wrapper_path,
+                    ],
+                    credentials,
+                )
 
-    def _redirect_script(self, interpreter: str, script: str, guest_output: str) -> str:
-        if Path(interpreter).name.lower() == "powershell.exe":
-            escaped_output = guest_output.replace("'", "''")
-            escaped_script = script.replace("'", "''")
-            return (
-                f"& {{ {escaped_script} }} *>&1 | "
-                f"Out-File -FilePath '{escaped_output}' -Encoding UTF8"
-            )
-        return f'/c {script.removeprefix("/c ")} > "{guest_output}" 2>&1'
+    async def _copy_to_guest(
+        self,
+        vm_id: str,
+        host_path: str,
+        guest_path: str,
+        credentials: GuestCredentials,
+    ) -> None:
+        await self._vmrun.copy_to_guest(
+            vm_id,
+            host_path,
+            guest_path,
+            user=credentials.user,
+            password=credentials.password,
+        )
+
+    async def _copy_from_guest(
+        self,
+        vm_id: str,
+        guest_path: str,
+        host_path: Path,
+        credentials: GuestCredentials,
+    ) -> None:
+        await self._vmrun.copy_from_guest(
+            vm_id,
+            guest_path,
+            str(host_path),
+            user=credentials.user,
+            password=credentials.password,
+        )
+
+    async def _copy_exit_code(
+        self,
+        vm_id: str,
+        guest_path: str,
+        host_path: Path,
+        credentials: GuestCredentials,
+        encoding: str = "utf-8",
+    ) -> tuple[int, str]:
+        try:
+            await self._copy_from_guest(vm_id, guest_path, host_path, credentials)
+            return _read_exit_code(host_path, encoding), ""
+        except (RuntimeError, ValueError) as exc:
+            detail = str(exc)
+            reason = type(exc).__name__ if not detail else f"{type(exc).__name__}: {detail}"
+            return 1, f"guest exit code unavailable: {reason}"
+
+    async def _cleanup_guest_files(
+        self,
+        vm_id: str,
+        guest_paths: list[str],
+        credentials: GuestCredentials,
+    ) -> None:
+        for guest_path in guest_paths:
+            try:
+                await self._vmrun.delete_file(
+                    vm_id,
+                    guest_path,
+                    user=credentials.user,
+                    password=credentials.password,
+                )
+            except RuntimeError as exc:
+                _LOGGER.warning(
+                    "Guest temp cleanup failed for %s: %s",
+                    Path(guest_path).suffix,
+                    type(exc).__name__,
+                )
