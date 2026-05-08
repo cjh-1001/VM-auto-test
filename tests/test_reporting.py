@@ -57,12 +57,12 @@ def test_write_batch_report_creates_summary_and_sample_artifacts(tmp_path):
 
     write_batch_report(report)
 
-    data = json.loads((tmp_path / "result.json").read_text(encoding="utf-8"))
+    data = json.loads((tmp_path / "result.json").read_text(encoding="utf-8-sig"))
     assert data["schema_version"] == 2
     assert data["summary"]["total"] == 1
     assert data["summary"]["overall_classification"] == "BASELINE_VALID"
     assert (tmp_path / "samples" / "one" / "result.json").exists()
-    assert (tmp_path / "samples" / "one" / "before.txt").read_text(encoding="utf-8") == "before"
+    assert (tmp_path / "samples" / "one" / "before.txt").read_text(encoding="utf-8-sig") == "before"
 
 
 def test_load_baseline_accepts_batch_report_only_when_all_samples_valid(tmp_path):
@@ -76,7 +76,7 @@ def test_load_baseline_accepts_batch_report_only_when_all_samples_valid(tmp_path
                 "samples": [{"classification": "BASELINE_VALID"}],
             }
         ),
-        encoding="utf-8",
+        encoding="utf-8-sig",
     )
     invalid_path = tmp_path / "invalid.json"
     invalid_path.write_text(
@@ -88,7 +88,7 @@ def test_load_baseline_accepts_batch_report_only_when_all_samples_valid(tmp_path
                 "samples": [{"classification": "BASELINE_INVALID"}],
             }
         ),
-        encoding="utf-8",
+        encoding="utf-8-sig",
     )
 
     assert load_baseline_is_valid(str(valid_path)) is True

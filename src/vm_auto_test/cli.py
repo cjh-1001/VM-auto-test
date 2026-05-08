@@ -195,7 +195,7 @@ async def build_config_interactively(
     if not guest_user:
         raise ValueError("Guest user is required")
     print("Guest password env 只填环境变量名，不要填真实密码。")
-    print(f"如果 .env 里是 VMWARE_GUEST_PASSWORD=admin123，这里直接回车或填 {DEFAULT_PASSWORD_ENV}。")
+    print(f"如果 .env 里是 VMWARE_GUEST_PASSWORD=<your-password>，这里直接回车或填 {DEFAULT_PASSWORD_ENV}。")
     password_env = input(f"Guest password env name [{DEFAULT_PASSWORD_ENV}]: ").strip() or DEFAULT_PASSWORD_ENV
 
     return TestConfig(

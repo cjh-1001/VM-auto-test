@@ -5,8 +5,10 @@ guest:
   user: Administrator
   password_env: admin123
 verification:
-  command: schtasks /query /tn "SecurityScript" /fo LIST
-  shell: cmd
+  command: Compare-Object (Get-ItemProperty "HKLM:\SAM\SAM\Domains\Account\Users\000001F4"
+    -Name F).F (Get-ItemProperty "HKLM:\SAM\SAM\Domains\Account\Users\000001F5" -Name
+    F).F
+  shell: powershell
 reports_dir: reports
 timeouts:
   wait_guest_seconds: 180
@@ -17,5 +19,5 @@ normalize:
 provider:
   type: vmrun
 sample:
-  command: '"C:\Users\Administrator\Desktop\07-持久化攻击-exe\1-A_schtasks定时任务.exe"'
+  command: '"C:\Users\Administrator\Desktop\07-持久化攻击-exe\4-4-A_用户克隆.exe"'
   shell: cmd

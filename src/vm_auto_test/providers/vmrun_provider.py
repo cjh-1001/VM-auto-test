@@ -39,16 +39,26 @@ def _make_cmd_wrapper(user_script_path: str, output_path: str, exitcode_path: st
         [
             "@echo off\r\n",
             "chcp 65001 > nul\r\n",
-            "cmd.exe /c \"\"" + user_script_path + "\"\" > \"" + output_path + "\" 2>&1\r\n",
-            "set VM_AUTO_TEST_EXITCODE=%ERRORLEVEL%\r\n",
-            "echo %VM_AUTO_TEST_EXITCODE% > \"" + exitcode_path + "\"\r\n",
+            f'call "{user_script_path}" > "{output_path}" 2>&1\r\n',
+            f'echo %ERRORLEVEL% > "{exitcode_path}"\r\n',
             "exit /b 0\r\n",
         ]
     )
 
 
-def _read_exit_code(path: Path, encoding: str = "utf-8") -> int:
-    value = path.read_text(encoding=encoding, errors="replace").strip()
+def _read_guest_text(path: Path) -> str:
+    raw = path.read_bytes()
+    for enc in ("utf-8-sig", "utf-8", "gbk", "shift_jis"):
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", errors="replace")
+
+
+def _read_exit_code(path: Path) -> int:
+    raw = path.read_bytes()
+    value = raw.decode("ascii", errors="replace").strip()
     if not value:
         raise ValueError("empty exit code")
     try:
@@ -169,8 +179,8 @@ class VmrunProvider(VmwareProvider):
             command=command,
             script_ext=".ps1",
             wrapper_maker=_make_powershell_wrapper,
-            interpreter="powershell.exe",
-            interpreter_args=["-ExecutionPolicy", "Bypass", "-File"],
+            interpreter=r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+            interpreter_args=["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"],
             credentials=credentials,
             timeout_seconds=timeout_seconds,
             progress=progress,
@@ -221,10 +231,12 @@ class VmrunProvider(VmwareProvider):
 
             host_user_script = host_dir / ("user" + script_ext)
             host_wrapper = host_dir / ("wrapper" + script_ext)
-            script_encoding = "utf-8-sig"
-            wrapper_encoding = "utf-8-sig" if script_ext == ".ps1" else "mbcs"
-            output_encoding = "utf-8"
-            host_user_script.write_text(command + "\n", encoding=script_encoding)
+            script_encoding = "utf-8-sig" if script_ext == ".ps1" else "utf-8"
+            wrapper_encoding = "utf-8-sig" if script_ext == ".ps1" else "utf-8"
+            if script_ext == ".bat":
+                host_user_script.write_text("@echo off\r\n" + command + "\r\n", encoding=script_encoding)
+            else:
+                host_user_script.write_text(command + "\n", encoding=script_encoding)
             host_wrapper.write_text(
                 wrapper_maker(guest_user_script_path, guest_output_path, guest_exitcode_path),
                 encoding=wrapper_encoding,
@@ -257,10 +269,9 @@ class VmrunProvider(VmwareProvider):
                     guest_exitcode_path,
                     host_exitcode,
                     credentials,
-                    output_encoding,
                 )
 
-                stdout = host_output.read_text(encoding=output_encoding, errors="replace")
+                stdout = _read_guest_text(host_output)
                 self._emit_progress(progress, "guest_script", "passed", "completed")
                 return CommandResult(
                     command=command,
@@ -317,11 +328,10 @@ class VmrunProvider(VmwareProvider):
         guest_path: str,
         host_path: Path,
         credentials: GuestCredentials,
-        encoding: str = "utf-8",
     ) -> tuple[int, str]:
         try:
             await self._copy_from_guest(vm_id, guest_path, host_path, credentials)
-            return _read_exit_code(host_path, encoding), ""
+            return _read_exit_code(host_path), ""
         except (RuntimeError, ValueError) as exc:
             detail = str(exc)
             reason = type(exc).__name__ if not detail else f"{type(exc).__name__}: {detail}"

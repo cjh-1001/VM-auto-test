@@ -36,8 +36,8 @@ async def test_baseline_is_valid_when_verification_output_changes(tmp_path):
     report_dir = Path(result.report_dir)
     assert report_dir.parent == tmp_path
     assert (report_dir / "result.json").exists()
-    assert (report_dir / "before.txt").read_text(encoding="utf-8") == "missing"
-    assert (report_dir / "after.txt").read_text(encoding="utf-8") == "present"
+    assert (report_dir / "before.txt").read_text(encoding="utf-8-sig") == "missing"
+    assert (report_dir / "after.txt").read_text(encoding="utf-8-sig") == "present"
 
 
 @pytest.mark.asyncio
@@ -353,12 +353,11 @@ def test_make_cmd_wrapper_includes_output_and_exitcode_paths():
         "C:\\Temp\\out.txt",
         "C:\\Temp\\ec.txt",
     )
-    assert 'cmd.exe /c ""C:\\Temp\\user.bat""' in script
-    assert 'C:\\Temp\\out.txt' in script
-    assert 'C:\\Temp\\ec.txt' in script
-    assert "%ERRORLEVEL%" in script
-    assert 'echo %VM_AUTO_TEST_EXITCODE% > "C:\\Temp\\ec.txt"' in script
-    assert "2>&1" in script
+    assert "chcp 65001" in script
+    assert 'call "C:\\Temp\\user.bat"' in script
+    assert '> "C:\\Temp\\out.txt" 2>&1' in script
+    assert 'echo %ERRORLEVEL% > "C:\\Temp\\ec.txt"' in script
+    assert "exit /b 0" in script
 
 
 def test_make_cmd_wrapper_starts_with_echo_off():
@@ -372,9 +371,9 @@ def test_make_cmd_wrapper_preserves_non_ascii_script_path():
         "C:\\临时目录\\输出.txt",
         "C:\\临时目录\\退出码.txt",
     )
-    assert 'cmd.exe /c ""C:\\临时目录\\脚本.bat""' in script
-    assert '> "C:\\临时目录\\输出.txt"' in script
-    assert 'echo %VM_AUTO_TEST_EXITCODE% > "C:\\临时目录\\退出码.txt"' in script
+    assert 'call "C:\\临时目录\\脚本.bat"' in script
+    assert '> "C:\\临时目录\\输出.txt" 2>&1' in script
+    assert 'echo %ERRORLEVEL% > "C:\\临时目录\\退出码.txt"' in script
 
 
 # -- run_guest_command integration tests ------------------------------------
@@ -422,6 +421,10 @@ async def test_run_cmd_passes_progress_and_returns_command_result():
 @pytest.mark.asyncio
 async def test_run_powershell_passes_progress():
     class FakeVMRun:
+        def __init__(self):
+            self.program = ""
+            self.program_args = []
+
         async def create_temp_file(self, vm_id, user, password):
             return "C:\\Temp\\vmware-temp-12345.txt"
 
@@ -429,6 +432,8 @@ async def test_run_powershell_passes_progress():
             return "ok"
 
         async def run_program_in_guest(self, vm_id, program, program_args, user, password):
+            self.program = program
+            self.program_args = program_args
             return "ok"
 
         async def copy_from_guest(self, vm_id, guest_path, host_path, user, password):
@@ -442,7 +447,8 @@ async def test_run_powershell_passes_progress():
         async def delete_file(self, vm_id, guest_path, user, password):
             return "ok"
 
-    provider = VmrunProvider(vmrun=FakeVMRun())
+    fake_vmrun = FakeVMRun()
+    provider = VmrunProvider(vmrun=fake_vmrun)
     events = []
 
     result = await provider.run_guest_command(
@@ -457,6 +463,9 @@ async def test_run_powershell_passes_progress():
     assert isinstance(result, CommandResult)
     assert result.exit_code == 0
     assert result.capture_method == "redirected_file"
+    assert fake_vmrun.program == r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+    assert fake_vmrun.program_args[:4] == ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"]
+    assert fake_vmrun.program_args[-1].endswith(".wrapper.ps1")
 
 
 @pytest.mark.asyncio
