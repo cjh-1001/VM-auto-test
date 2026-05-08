@@ -40,7 +40,7 @@ def is_env_configured() -> bool:
     vmrun = os.getenv("VMRUN_PATH", "")
     if not vmrun:
         return False
-    return Path(vmrun).is_file() and bool(os.getenv("VMWARE_GUEST_USER", ""))
+    return Path(vmrun).is_file()
 
 
 def resolve_guest_credentials(vm_id: str) -> GuestCredentials | None:

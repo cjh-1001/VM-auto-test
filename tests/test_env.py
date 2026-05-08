@@ -76,10 +76,11 @@ def test_is_env_configured_returns_false_when_vmrun_not_a_file(tmp_path, monkeyp
     assert not is_env_configured()
 
 
-def test_is_env_configured_returns_false_when_user_empty(tmp_path, monkeypatch):
+def test_is_env_configured_returns_true_when_only_vmrun_set(tmp_path, monkeypatch):
     vmrun_exe = tmp_path / "vmrun.exe"
     vmrun_exe.write_text("")
     monkeypatch.setenv("VMRUN_PATH", str(vmrun_exe))
     monkeypatch.delenv("VMWARE_GUEST_USER", raising=False)
+    monkeypatch.delenv("VMWARE_GUEST_PASSWORD", raising=False)
 
-    assert not is_env_configured()
+    assert is_env_configured()

@@ -549,17 +549,13 @@ async def _interactive_single(provider: VmwareProvider) -> None:
 
         # — step 3: Sample —
         if step == 3:
-            print("\n  —— 样本命令 ——")
-            result = _prompt_back("样本命令 (例如 C:\\Samples\\sample.exe)")
+            print("\n  —— 样本路径 ——")
+            result = _prompt_back("样本路径 (例如 C:\\Samples\\sample.exe)")
             if result is None:
                 step = 2
                 continue
             sample_command = result
-            result = choose_value("用哪个 shell 执行", ["cmd", "powershell"], default="cmd")
-            if result is _BACK:
-                step = 2
-                continue
-            sample_shell = Shell(result)
+            sample_shell = Shell("cmd")
             step = 4
             continue
 
@@ -807,8 +803,8 @@ async def _interactive_setup(env_file: Path) -> None:
     vmrun_path = _prompt_env("vmrun.exe 路径", os.getenv("VMRUN_PATH"))
 
     print("\n  --- vmrest/MCP 配置 (可选) ---")
-    vmware_host = _prompt_env("VMWARE_HOST", os.getenv("VMWARE_HOST"))
-    vmware_port = _prompt_env("VMWARE_PORT", os.getenv("VMWARE_PORT"))
+    vmware_host = _prompt_env("VMWARE_HOST", os.getenv("VMWARE_HOST") or "localhost")
+    vmware_port = _prompt_env("VMWARE_PORT", os.getenv("VMWARE_PORT") or "8697")
 
     existing = load_env_file_text(env_file)
     vmware_user = _keep_existing("VMWARE_GUEST_USER", existing)
@@ -924,7 +920,7 @@ async def build_config_interactively(
         sample = None
         samples = sample_configs
     else:
-        print("Sample command 是要在 guest 里执行的样本命令。")
+        print("Sample path 是要在 guest 里执行的样本路径。")
         print("例如: C:\\Samples\\sample.exe 或 C:\\Samples\\run.bat")
         sample_command = input("Sample command: ").strip()
         if not sample_command:
