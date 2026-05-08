@@ -12,15 +12,27 @@ from vm_auto_test.config import (
     CommandConfig,
     GuestConfig,
     NormalizeConfig,
+    SampleConfig,
     TestConfig,
     TimeoutConfig,
     VerificationConfig,
     load_config,
+    parse_csv_samples,
+    scan_samples_from_directory,
     to_test_case,
     write_config,
 )
-from vm_auto_test.env import load_optional_env_file
-from vm_auto_test.models import GuestCredentials, Shell, StepResult, TestCase, TestMode
+from vm_auto_test.env import is_env_configured, load_env_file, load_optional_env_file
+from vm_auto_test.models import (
+    ComparisonSpec,
+    GuestCredentials,
+    SampleSpec,
+    Shell,
+    StepResult,
+    TestCase,
+    TestMode,
+    VerificationSpec,
+)
 from vm_auto_test.orchestrator import TestOrchestrator
 from vm_auto_test.providers.base import VmwareProvider
 from vm_auto_test.providers.factory import create_provider
@@ -29,7 +41,7 @@ from vm_auto_test.providers.factory import create_provider
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run VMware guest sample validation tests.")
     parser.add_argument("--env-file", help="Load environment variables from a .env file before running")
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    subparsers = parser.add_subparsers(dest="command")
 
     subparsers.add_parser("vms", help="List running VMs")
 
@@ -56,6 +68,31 @@ def build_parser() -> argparse.ArgumentParser:
     init_parser.add_argument("--output", default="configs/sample.yaml", help="Config file to write")
     init_parser.add_argument("--vm", help="VM ID or .vmx path")
     init_parser.add_argument("--mode", choices=[mode.value for mode in TestMode])
+    init_parser.add_argument("--samples-dir", help="Directory of sample files to auto-generate samples list")
+
+    run_dir_parser = subparsers.add_parser("run-dir", help="Run all samples from a directory")
+    run_dir_parser.add_argument("--vm", required=True, help="VM ID or .vmx path")
+    run_dir_parser.add_argument("--mode", choices=[mode.value for mode in TestMode], required=True)
+    run_dir_parser.add_argument("--snapshot", help="Snapshot name. If omitted, choose interactively.")
+    run_dir_parser.add_argument("--dir", required=True, help="Directory containing sample files")
+    run_dir_parser.add_argument("--pattern", help="File glob pattern (e.g. *.exe)")
+    run_dir_parser.add_argument("--verify-command", required=True, help="Guest command that verifies effect")
+    run_dir_parser.add_argument("--verify-shell", choices=[shell.value for shell in Shell], default=Shell.POWERSHELL.value)
+    run_dir_parser.add_argument("--guest-user")
+    run_dir_parser.add_argument("--guest-password")
+    run_dir_parser.add_argument("--baseline-result", help="Required for AV mode")
+    run_dir_parser.add_argument("--reports-dir", default="reports")
+
+    run_csv_parser = subparsers.add_parser("run-csv", help="Run all samples from a CSV table")
+    run_csv_parser.add_argument("--vm", required=True, help="VM ID or .vmx path")
+    run_csv_parser.add_argument("--mode", choices=[mode.value for mode in TestMode], required=True)
+    run_csv_parser.add_argument("--snapshot", help="Snapshot name. If omitted, choose interactively.")
+    run_csv_parser.add_argument("--csv", required=True, help="Path to CSV file (UTF-8 BOM, columns: sample_file,shell,verify_command,verify_shell)")
+    run_csv_parser.add_argument("--samples-base-dir", help="Base directory on VM for relative sample paths")
+    run_csv_parser.add_argument("--guest-user")
+    run_csv_parser.add_argument("--guest-password")
+    run_csv_parser.add_argument("--baseline-result", help="Required for AV mode")
+    run_csv_parser.add_argument("--reports-dir", default="reports")
 
     run_config_parser = subparsers.add_parser("run-config", help="Run validation from a YAML config")
     run_config_parser.add_argument("config", help="YAML config file")
@@ -68,6 +105,13 @@ async def main_async() -> None:
     args = parser.parse_args()
     load_optional_env_file(Path(args.env_file) if args.env_file else None)
     provider = create_provider("vmrun")
+
+    if args.command is None:
+        env_path = Path(args.env_file) if args.env_file else Path(".env")
+        if not is_env_configured():
+            await _interactive_setup(env_path)
+        await _interactive_menu(provider, env_path)
+        return
 
     if args.command == "vms":
         running_vms = await provider.list_running_vms()
@@ -88,8 +132,103 @@ async def main_async() -> None:
             print(f"[{index}] {snapshot}")
         return
 
+    if args.command == "run-dir":
+        sample_dir = Path(args.dir)
+        globs = (args.pattern,) if args.pattern else None
+        sample_configs = scan_samples_from_directory(sample_dir) if globs is None else scan_samples_from_directory(sample_dir, globs=globs)
+
+        run_dir_orchestrator = TestOrchestrator(provider, Path(args.reports_dir), progress=print_progress)
+        vm_id = clean_cli_value(args.vm)
+        snapshot = clean_cli_value(args.snapshot) if args.snapshot else None
+        if not snapshot:
+            snapshots_list = await run_dir_orchestrator.list_snapshots(vm_id)
+            if not snapshots_list:
+                raise RuntimeError("No snapshots found for VM")
+            snapshot = choose_snapshot(snapshots_list)
+
+        guest_user = args.guest_user or os.getenv("VMWARE_GUEST_USER", "") or input("Guest user: ")
+        guest_password = args.guest_password or os.getenv("VMWARE_GUEST_PASSWORD")
+        if guest_password is None:
+            guest_password = getpass.getpass("Guest password: ")
+
+        sample_specs = tuple(
+            SampleSpec(id=cfg.id, command=cfg.command, shell=cfg.shell)
+            for cfg in sample_configs
+        )
+        verify_shell = Shell(args.verify_shell)
+        verify_command = clean_cli_value(args.verify_command)
+        test_case = TestCase(
+            vm_id=vm_id,
+            snapshot=snapshot,
+            mode=TestMode(args.mode),
+            sample_command=sample_configs[0].command,
+            sample_shell=sample_configs[0].shell,
+            verify_command=verify_command,
+            verify_shell=verify_shell,
+            credentials=GuestCredentials(guest_user, guest_password),
+            baseline_result=args.baseline_result,
+            samples=sample_specs,
+            verification=VerificationSpec(command=verify_command, shell=verify_shell),
+        )
+        batch_result = await run_dir_orchestrator.run_batch(test_case)
+        print(f"结果: {_classify_cn(batch_result.classification)}  ({batch_result.classification.value})  共 {len(batch_result.samples)} 个样本")
+        for sample_item in batch_result.samples:
+            print(f"sample={sample_item.sample_spec.id} {_classify_cn(sample_item.classification, short=True)} changed={sample_item.changed}")
+        print(f"report_dir={batch_result.report_dir}")
+        return
+
+    if args.command == "run-csv":
+        csv_path = Path(args.csv)
+        sample_configs = parse_csv_samples(csv_path, samples_base_dir=args.samples_base_dir)
+        print(f"Loaded {len(sample_configs)} samples from {csv_path}")
+
+        csv_orchestrator = TestOrchestrator(provider, Path(args.reports_dir), progress=print_progress)
+        vm_id = clean_cli_value(args.vm)
+        snapshot = clean_cli_value(args.snapshot) if args.snapshot else None
+        if not snapshot:
+            snapshots_list = await csv_orchestrator.list_snapshots(vm_id)
+            if not snapshots_list:
+                raise RuntimeError("No snapshots found for VM")
+            snapshot = choose_snapshot(snapshots_list)
+
+        guest_user = args.guest_user or os.getenv("VMWARE_GUEST_USER", "") or input("Guest user: ")
+        guest_password = args.guest_password or os.getenv("VMWARE_GUEST_PASSWORD")
+        if guest_password is None:
+            guest_password = getpass.getpass("Guest password: ")
+
+        sample_specs: list[SampleSpec] = []
+        for cfg in sample_configs:
+            verification = VerificationSpec(
+                command=cfg.verification.command,
+                shell=cfg.verification.shell,
+            ) if cfg.verification else VerificationSpec(command="", shell=Shell.POWERSHELL)
+            sample_specs.append(
+                SampleSpec(id=cfg.id, command=cfg.command, shell=cfg.shell, verification=verification)
+            )
+
+        first_verification = sample_specs[0].verification if sample_specs[0].verification else VerificationSpec(command="", shell=Shell.POWERSHELL)
+        test_case = TestCase(
+            vm_id=vm_id,
+            snapshot=snapshot,
+            mode=TestMode(args.mode),
+            sample_command=sample_configs[0].command,
+            sample_shell=sample_configs[0].shell,
+            verify_command=first_verification.command,
+            verify_shell=first_verification.shell,
+            credentials=GuestCredentials(guest_user, guest_password),
+            baseline_result=args.baseline_result,
+            samples=tuple(sample_specs),
+            verification=first_verification,
+        )
+        batch_result = await csv_orchestrator.run_batch(test_case)
+        print(f"结果: {_classify_cn(batch_result.classification)}  ({batch_result.classification.value})  共 {len(batch_result.samples)} 个样本")
+        for sample_item in batch_result.samples:
+            print(f"sample={sample_item.sample_spec.id} {_classify_cn(sample_item.classification, short=True)} changed={sample_item.changed}")
+        print(f"report_dir={batch_result.report_dir}")
+        return
+
     if args.command == "init-config":
-        config = await build_config_interactively(provider, args.vm, args.mode)
+        config = await build_config_interactively(provider, args.vm, args.mode, samples_dir=args.samples_dir)
         output = Path(args.output)
         write_config(output, config)
         print(f"config={output}")
@@ -102,13 +241,13 @@ async def main_async() -> None:
         config_orchestrator = TestOrchestrator(config_provider, Path(config.reports_dir), progress=print_progress)
         if config.samples:
             batch_result = await config_orchestrator.run_batch(test_case)
-            print(f"classification={batch_result.classification.value}")
-            print(f"total={len(batch_result.samples)}")
+            print(f"结果: {_classify_cn(batch_result.classification)}  ({batch_result.classification.value})  共 {len(batch_result.samples)} 个样本")
             for sample in batch_result.samples:
-                print(f"sample={sample.sample_spec.id} classification={sample.classification.value} changed={sample.changed}")
+                print(f"  {sample.sample_spec.id}  {_classify_cn(sample.classification, short=True)}")
             print(f"report_dir={batch_result.report_dir}")
             return
         result = await config_orchestrator.run(test_case)
+        print(f"结果: {_classify_cn(result.classification)}")
         print(f"classification={result.classification.value}")
         print(f"changed={result.changed}")
         print(f"report_dir={result.report_dir}")
@@ -140,9 +279,253 @@ async def main_async() -> None:
         baseline_result=args.baseline_result,
     )
     result = await orchestrator.run(test_case)
+    print(f"结果: {_classify_cn(result.classification)}")
     print(f"classification={result.classification.value}")
     print(f"changed={result.changed}")
     print(f"report_dir={result.report_dir}")
+
+
+async def _interactive_menu(provider: VmwareProvider, env_file: Path) -> None:
+    print("\n  VM Auto Test")
+    print("  [1] 测试单样本")
+    print("  [2] 测试多样本 (CSV)")
+    print("  [3] 列出 VM")
+    print("  [4] 列出快照")
+    print("  [5] 重新配置环境")
+    choice = input("\n  > ").strip()
+
+    if choice == "5":
+        await _interactive_setup(env_file)
+        return
+
+    if choice == "3":
+        vms = await provider.list_running_vms()
+        if not vms:
+            print("No running VMs found.")
+        else:
+            for i, vm in enumerate(vms, 1):
+                print(f"[{i}] {vm}")
+        return
+
+    if choice == "4":
+        vm_id = clean_cli_value(input("VM path: "))
+        orchestrator = TestOrchestrator(provider, Path("reports"))
+        snapshots = await orchestrator.list_snapshots(vm_id)
+        if not snapshots:
+            print("No snapshots found.")
+        else:
+            for i, s in enumerate(snapshots, 1):
+                print(f"[{i}] {s}")
+        return
+
+    if choice == "1":
+        await _interactive_single(provider)
+    elif choice == "2":
+        await _interactive_csv(provider)
+    else:
+        print("Invalid choice")
+
+
+async def _interactive_single(provider: VmwareProvider) -> None:
+    # 1. VM
+    running = await provider.list_running_vms()
+    if running:
+        print("\n-- 选择 VM --")
+        vm_id = choose_snapshot(running)
+    else:
+        vm_id = clean_cli_value(input("\nVM path: "))
+
+    # 2. Snapshot
+    orchestrator = TestOrchestrator(provider, Path("reports"))
+    snapshots = await orchestrator.list_snapshots(vm_id)
+    if not snapshots:
+        raise RuntimeError("No snapshots found")
+    print("\n-- 选择快照 --")
+    snapshot = choose_snapshot(snapshots)
+
+    # 3. Mode
+    print("\n-- 选择模式 --")
+    print("  baseline = 干净快照，验证样本是否有效（前后输出不同 → 有效）")
+    print("  av       = 带杀软快照，验证杀软能否拦截（需先通过 baseline）")
+    mode = TestMode(choose_value("模式", ["baseline", "av"], default="baseline"))
+    baseline_result = None
+    if mode == TestMode.AV:
+        print("  AV 模式需要一份已通过的 baseline 报告（result.json）来确认样本本身有效。")
+        baseline_result = clean_cli_value(input("  Baseline result.json 路径: "))
+
+    # 4. Sample
+    print("\n-- 样本命令 --")
+    sample_command = input("样本命令 (例如 C:\\Samples\\sample.exe): ").strip()
+    sample_shell = Shell(choose_value("用哪个 shell 执行", ["cmd", "powershell"], default="cmd"))
+
+    # 5. Verify
+    print("\n-- 验证命令（样本跑前/跑后各执行一次）--")
+    verify_command = input("验证命令: ").strip()
+    verify_shell = Shell(choose_value("用哪个 shell 执行", ["cmd", "powershell"], default="powershell"))
+
+    # 6. Guest
+    guest_user = os.getenv("VMWARE_GUEST_USER") or input("Guest 用户名: ").strip()
+    guest_password = os.getenv("VMWARE_GUEST_PASSWORD") or getpass.getpass("Guest 密码: ")
+
+    # 7. Confirm & run
+    print(f"\n  VM:       {vm_id}")
+    print(f"  快照:     {snapshot}")
+    print(f"  模式:     {mode.value}")
+    print(f"  样本:     [{sample_shell.value}] {sample_command}")
+    print(f"  验证:     [{verify_shell.value}] {verify_command}")
+    if baseline_result:
+        print(f"  baseline: {baseline_result}")
+    if input("\n  确认执行? [y/N] ").strip().lower() != "y":
+        print("已取消")
+        return
+
+    test_case = TestCase(
+        vm_id=vm_id, snapshot=snapshot, mode=mode,
+        sample_command=sample_command, sample_shell=sample_shell,
+        verify_command=verify_command, verify_shell=verify_shell,
+        credentials=GuestCredentials(guest_user, guest_password),
+        baseline_result=baseline_result,
+    )
+    orch = TestOrchestrator(provider, Path("reports"), progress=print_progress)
+    result = await orch.run(test_case)
+    print(f"\n  结果: {_classify_cn(result.classification)}")
+    print(f"  分类: {result.classification.value}  changed={result.changed}")
+    print(f"  报告: {result.report_dir}")
+
+
+async def _interactive_csv(provider: VmwareProvider) -> None:
+    # 1. VM
+    running = await provider.list_running_vms()
+    if running:
+        print("\n-- 选择 VM --")
+        vm_id = choose_snapshot(running)
+    else:
+        vm_id = clean_cli_value(input("\nVM path: "))
+
+    # 2. Snapshot
+    orchestrator = TestOrchestrator(provider, Path("reports"))
+    snapshots = await orchestrator.list_snapshots(vm_id)
+    if not snapshots:
+        raise RuntimeError("No snapshots found")
+    print("\n-- 选择快照 --")
+    snapshot = choose_snapshot(snapshots)
+
+    # 3. Mode
+    print("\n-- 选择模式 --")
+    print("  baseline = 干净快照，验证样本是否有效（前后输出不同 → 有效）")
+    print("  av       = 带杀软快照，验证杀软能否拦截（需先通过 baseline）")
+    mode = TestMode(choose_value("模式", ["baseline", "av"], default="baseline"))
+    baseline_result = None
+    if mode == TestMode.AV:
+        print("  AV 模式需要一份已通过的 baseline 报告（result.json）来确认样本本身有效。")
+        baseline_result = clean_cli_value(input("  Baseline result.json 路径: "))
+
+    # 4. CSV
+    csv_path = Path(clean_cli_value(input("\nCSV 文件路径: ").strip()))
+    samples_base_dir = input("VM 上样本目录 (回车跳过): ").strip() or None
+
+    # 5. Guest
+    guest_user = os.getenv("VMWARE_GUEST_USER") or input("Guest 用户名: ").strip()
+    guest_password = os.getenv("VMWARE_GUEST_PASSWORD") or getpass.getpass("Guest 密码: ")
+
+    # 6. Parse & confirm
+    sample_configs = parse_csv_samples(csv_path, samples_base_dir=samples_base_dir)
+    print(f"\n  从 CSV 读取 {len(sample_configs)} 个样本:")
+    for cfg in sample_configs:
+        print(f"    [{cfg.shell.value}] {cfg.command}")
+        print(f"      verify: [{cfg.verification.shell.value}] {cfg.verification.command}")
+    print(f"  VM:       {vm_id}")
+    print(f"  快照:     {snapshot}")
+    print(f"  模式:     {mode.value}")
+    if baseline_result:
+        print(f"  baseline: {baseline_result}")
+    if input("\n  确认执行? [y/N] ").strip().lower() != "y":
+        print("已取消")
+        return
+
+    # 7. Run
+    sample_specs: list[SampleSpec] = []
+    for cfg in sample_configs:
+        v = cfg.verification
+        sample_specs.append(SampleSpec(
+            id=cfg.id, command=cfg.command, shell=cfg.shell,
+            verification=VerificationSpec(command=v.command, shell=v.shell),
+        ))
+    first_v = sample_specs[0].verification
+    test_case = TestCase(
+        vm_id=vm_id, snapshot=snapshot, mode=mode,
+        sample_command=sample_configs[0].command,
+        sample_shell=sample_configs[0].shell,
+        verify_command=first_v.command if first_v else "",
+        verify_shell=first_v.shell if first_v else Shell.POWERSHELL,
+        credentials=GuestCredentials(guest_user, guest_password),
+        baseline_result=baseline_result,
+        samples=tuple(sample_specs),
+        verification=first_v or VerificationSpec(command="", shell=Shell.POWERSHELL),
+    )
+    orch = TestOrchestrator(provider, Path("reports"), progress=print_progress)
+    batch_result = await orch.run_batch(test_case)
+    print(f"\n  {_classify_cn(batch_result.classification)}  ({batch_result.classification.value})  共 {len(batch_result.samples)} 个样本")
+    for s in batch_result.samples:
+        print(f"    {s.sample_spec.id}  {_classify_cn(s.classification, short=True)}")
+    print(f"  报告: {batch_result.report_dir}")
+
+
+async def _interactive_setup(env_file: Path) -> None:
+    print("\n  ⚙ 环境配置")
+    print("  回车保留当前值，输入新值覆盖\n")
+
+    vmrun_path = _prompt_env("vmrun.exe 路径", os.getenv("VMRUN_PATH"))
+
+    guest_user = _prompt_env("Guest 用户名", os.getenv("VMWARE_GUEST_USER"))
+
+    current_pw = os.getenv("VMWARE_GUEST_PASSWORD", "")
+    pw_display = "***" if current_pw else "(未设置)"
+    print(f"  Guest 密码  当前: {pw_display}")
+    guest_password = getpass.getpass("  新值: ").strip()
+    if not guest_password:
+        guest_password = current_pw
+
+    print("\n  --- vmrest/MCP 配置 (可选) ---")
+    vmware_host = _prompt_env("VMWARE_HOST", os.getenv("VMWARE_HOST"))
+    vmware_port = _prompt_env("VMWARE_PORT", os.getenv("VMWARE_PORT"))
+
+    lines = [
+        f"VMRUN_PATH={_quote_if_needed(vmrun_path)}",
+        "",
+        f"VMWARE_GUEST_USER={guest_user}",
+        f"VMWARE_GUEST_PASSWORD={guest_password}",
+        "",
+        f"VMWARE_HOST={vmware_host}",
+        f"VMWARE_PORT={vmware_port}",
+    ]
+    env_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    load_env_file(env_file, override=True)
+    print("\n  ✓ 配置已保存\n")
+
+
+def _prompt_env(label: str, current: str | None) -> str:
+    display = current if current else "(未设置)"
+    new_value = input(f"  {label}  当前: {display}\n  新值: ").strip()
+    return new_value if new_value else (current or "")
+
+
+def _classify_cn(classification: Any, short: bool = False) -> str:
+    mapping = {
+        "BASELINE_VALID": "有效" if short else "样本有效（前后输出有变化）",
+        "BASELINE_INVALID": "无效" if short else "样本无效（前后输出无变化）",
+        "AV_NOT_BLOCKED": "未拦截" if short else "杀软未拦截（攻击效果发生）",
+        "AV_BLOCKED_OR_NO_CHANGE": "已拦截" if short else "杀软已拦截或未生效",
+    }
+    value = classification.value if hasattr(classification, "value") else str(classification)
+    return mapping.get(value, value)
+
+
+def _quote_if_needed(value: str) -> str:
+    if value and (" " in value or "\\" in value):
+        if '"' not in value:
+            return f'"{value}"'
+    return value
 
 
 def print_progress(step: StepResult) -> None:
@@ -155,6 +538,7 @@ async def build_config_interactively(
     provider: VmwareProvider,
     vm_id: str | None,
     mode_value: str | None,
+    samples_dir: str | None = None,
 ) -> TestConfig:
     selected_vm_id = clean_cli_value(
         vm_id
@@ -177,12 +561,22 @@ async def build_config_interactively(
         if not baseline_result:
             raise ValueError("AV mode requires baseline result path")
 
-    print("Sample command 是要在 guest 里执行的样本命令。")
-    print("例如: C:\\Samples\\sample.exe 或 C:\\Samples\\run.bat")
-    sample_command = input("Sample command: ").strip()
-    if not sample_command:
-        raise ValueError("Sample command is required")
-    sample_shell = Shell(choose_value("Sample shell", [shell.value for shell in Shell], default=Shell.CMD.value))
+    if samples_dir:
+        sample_configs = scan_samples_from_directory(Path(samples_dir))
+        print(f"Auto-detected {len(sample_configs)} samples from {samples_dir}:")
+        for sample_cfg_item in sample_configs:
+            print(f"  - {sample_cfg_item.id}: {sample_cfg_item.command}")
+        sample = None
+        samples = sample_configs
+    else:
+        print("Sample command 是要在 guest 里执行的样本命令。")
+        print("例如: C:\\Samples\\sample.exe 或 C:\\Samples\\run.bat")
+        sample_command = input("Sample command: ").strip()
+        if not sample_command:
+            raise ValueError("Sample command is required")
+        sample_shell = Shell(choose_value("Sample shell", [shell.value for shell in Shell], default=Shell.CMD.value))
+        sample = CommandConfig(command=sample_command, shell=sample_shell)
+        samples = ()
 
     print("Verification command 是样本运行前后都要执行的验证命令，用来观察是否发生变化。")
     print("例如: type C:\\marker.txt、dir C:\\Users、net user")
@@ -204,7 +598,8 @@ async def build_config_interactively(
         mode=mode,
         baseline_result=baseline_result,
         guest=GuestConfig(user=guest_user, password_env=password_env),
-        sample=CommandConfig(command=sample_command, shell=sample_shell),
+        sample=sample,
+        samples=samples,
         verification=VerificationConfig(command=verify_command, shell=verify_shell),
         reports_dir=input("Reports dir [reports]: ").strip() or "reports",
         timeouts=TimeoutConfig(),

@@ -31,7 +31,7 @@ from vm_auto_test.reporting import (
 )
 
 _LOGGER = logging.getLogger(__name__)
-_SAMPLE_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_SAMPLE_ID_PATTERN = re.compile(r"^[^\x00-\x1f/\\]{1,64}$")
 ProgressCallback = Callable[[StepResult], None]
 T = TypeVar("T")
 
@@ -366,4 +366,4 @@ class TestOrchestrator:
 
     def _validate_sample_id(self, sample_id: str) -> None:
         if not _SAMPLE_ID_PATTERN.fullmatch(sample_id):
-            raise ValueError("Sample id must match [A-Za-z0-9_-] and be 1-64 characters")
+            raise ValueError("Sample id must be 1-64 characters and not contain / or \\")

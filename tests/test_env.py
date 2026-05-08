@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from vm_auto_test.env import load_env_file
+from vm_auto_test.env import is_env_configured, load_env_file
 
 
 def test_load_env_file_sets_values(tmp_path, monkeypatch):
@@ -50,3 +50,36 @@ def test_load_env_file_rejects_invalid_lines(tmp_path):
 
     with pytest.raises(ValueError, match="expected KEY=VALUE"):
         load_env_file(env_file)
+
+
+def test_is_env_configured_returns_true_when_vmrun_exists_and_user_set(tmp_path, monkeypatch):
+    vmrun_exe = tmp_path / "vmrun.exe"
+    vmrun_exe.write_text("")
+    monkeypatch.setenv("VMRUN_PATH", str(vmrun_exe))
+    monkeypatch.setenv("VMWARE_GUEST_USER", "Administrator")
+
+    assert is_env_configured()
+
+
+def test_is_env_configured_returns_false_when_vmrun_missing(monkeypatch):
+    monkeypatch.delenv("VMRUN_PATH", raising=False)
+    monkeypatch.setenv("VMWARE_GUEST_USER", "Administrator")
+
+    assert not is_env_configured()
+
+
+def test_is_env_configured_returns_false_when_vmrun_not_a_file(tmp_path, monkeypatch):
+    nonexistent = tmp_path / "nonexistent" / "vmrun.exe"
+    monkeypatch.setenv("VMRUN_PATH", str(nonexistent))
+    monkeypatch.setenv("VMWARE_GUEST_USER", "Administrator")
+
+    assert not is_env_configured()
+
+
+def test_is_env_configured_returns_false_when_user_empty(tmp_path, monkeypatch):
+    vmrun_exe = tmp_path / "vmrun.exe"
+    vmrun_exe.write_text("")
+    monkeypatch.setenv("VMRUN_PATH", str(vmrun_exe))
+    monkeypatch.delenv("VMWARE_GUEST_USER", raising=False)
+
+    assert not is_env_configured()

@@ -8,11 +8,12 @@ from typing import Any
 
 from vm_auto_test.evaluator import output_hash
 from vm_auto_test.models import BatchTestResult, Classification, SampleTestResult, TestResult
+from vm_auto_test.config import _sanitize_id
 
 
 def create_report_dir(base_dir: Path, test_id: str) -> Path:
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
-    safe_test_id = "".join(char if char.isalnum() or char in "-_" else "-" for char in test_id)
+    safe_test_id = _sanitize_id(test_id)
     for suffix in range(100):
         name = f"{timestamp}-{safe_test_id}" if suffix == 0 else f"{timestamp}-{safe_test_id}-{suffix}"
         report_dir = base_dir / name
@@ -177,7 +178,7 @@ def _write_sample_artifacts(report_dir: Path, before: str, after: str, sample_st
         logs_dir = report_dir / "av_logs"
         logs_dir.mkdir(parents=True, exist_ok=True)
         for log in logs:
-            safe_id = "".join(char if char.isalnum() or char in "-_" else "-" for char in log.collector_id)
+            safe_id = _sanitize_id(log.collector_id)
             (logs_dir / f"{safe_id}_stdout.txt").write_text(log.stdout, encoding="utf-8-sig")
             (logs_dir / f"{safe_id}_stderr.txt").write_text(log.stderr, encoding="utf-8-sig")
 

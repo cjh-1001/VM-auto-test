@@ -20,7 +20,7 @@ from vm_auto_test.models import (
 )
 
 DEFAULT_PASSWORD_ENV = "VMWARE_GUEST_PASSWORD"
-_SAMPLE_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_SAMPLE_ID_PATTERN = re.compile(r"^[^\x00-\x1f/\\]{1,64}$")
 
 
 @dataclass(frozen=True)
@@ -403,13 +403,21 @@ def _av_log_to_yaml(collector: AvLogCollectorConfig) -> dict[str, Any]:
 
 def _safe_sample_id(command: str) -> str:
     stem = Path(command).stem or "sample"
-    sample_id = "".join(char if char.isalnum() or char in "-_" else "-" for char in stem)
+    sample_id = _sanitize_id(stem)
     return _validate_sample_id(sample_id[:64] or "sample")
+
+
+def _sanitize_id(raw: str) -> str:
+    import re
+
+    s = "".join(char if char not in "/\\" and char.isprintable() else "-" for char in raw)
+    s = re.sub(r"-{2,}", "-", s)
+    return s.strip("-_")
 
 
 def _validate_sample_id(sample_id: str) -> str:
     if not _SAMPLE_ID_PATTERN.fullmatch(sample_id):
-        raise ValueError("Sample id must match [A-Za-z0-9_-] and be 1-64 characters")
+        raise ValueError("Sample id must be 1-64 characters and not contain / or \\")
     return sample_id
 
 
@@ -445,6 +453,119 @@ def _optional_bool(data: dict[str, Any], key: str, default: bool) -> bool:
         if normalized_value in {"false", "no", "0"}:
             return False
     raise ValueError(f"Config field '{key}' must be a boolean")
+
+
+_DEFAULT_SAMPLE_GLOBS = ("*.exe", "*.bat", "*.ps1", "*.cmd")
+_SHELL_BY_SUFFIX: dict[str, Shell] = {
+    ".ps1": Shell.POWERSHELL,
+}
+
+
+def scan_samples_from_directory(
+    directory: Path,
+    globs: tuple[str, ...] = _DEFAULT_SAMPLE_GLOBS,
+) -> tuple[SampleConfig, ...]:
+    directory = directory.expanduser().resolve()
+    if not directory.is_dir():
+        raise ValueError(f"Not a directory: {directory}")
+
+    seen: set[str] = set()
+    samples: list[SampleConfig] = []
+    for glob_pattern in globs:
+        for file_path in sorted(directory.glob(glob_pattern)):
+            if file_path.name in seen:
+                continue
+            seen.add(file_path.name)
+            sample_id = _safe_sample_id(file_path.name)
+            suffix = file_path.suffix.lower()
+            shell = _SHELL_BY_SUFFIX.get(suffix, Shell.CMD)
+            samples.append(
+                SampleConfig(
+                    id=sample_id,
+                    command=str(file_path),
+                    shell=shell,
+                )
+            )
+    if not samples:
+        raise ValueError(f"No sample files found in {directory} matching {globs}")
+    return tuple(samples)
+
+
+def parse_csv_samples(
+    csv_path: Path,
+    samples_base_dir: str | None = None,
+) -> tuple[SampleConfig, ...]:
+    import csv
+    import io
+
+    raw = csv_path.read_bytes()
+    text = _decode_csv_bytes(raw)
+
+    reader = csv.reader(io.StringIO(text))
+    rows = [row for row in reader if row]
+    if not rows:
+        raise ValueError("CSV file is empty")
+
+    header = rows[0]
+    if header and header[0].strip().lower().startswith("sample"):
+        rows = rows[1:]
+    if not rows:
+        raise ValueError("No data rows in CSV")
+
+    samples: list[SampleConfig] = []
+    for row_index, row in enumerate(rows, start=2):
+        if len(row) < 4:
+            raise ValueError(f"Row {row_index}: expected 4 columns (sample_file, shell, verify_command, verify_shell), got {len(row)}")
+        sample_file = row[0].strip()
+        shell_str = row[1].strip().lower()
+        verify_command = row[2].strip()
+        verify_shell_str = row[3].strip().lower()
+
+        if not sample_file:
+            raise ValueError(f"Row {row_index}: sample_file is empty")
+        if shell_str not in {"cmd", "powershell"}:
+            raise ValueError(f"Row {row_index}: shell must be 'cmd' or 'powershell', got '{shell_str}'")
+        if not verify_command:
+            raise ValueError(f"Row {row_index}: verify_command is empty")
+        if verify_shell_str not in {"cmd", "powershell"}:
+            raise ValueError(f"Row {row_index}: verify_shell must be 'cmd' or 'powershell', got '{verify_shell_str}'")
+
+        sample_path = Path(sample_file)
+        if sample_path.is_absolute():
+            command = str(sample_path)
+        elif samples_base_dir:
+            command = str(Path(samples_base_dir) / sample_file)
+        else:
+            raise ValueError(f"Row {row_index}: '{sample_file}' is not an absolute path and --samples-base-dir is not set")
+
+        sample_id = _safe_sample_id(sample_file)
+
+        samples.append(
+            SampleConfig(
+                id=sample_id,
+                command=command,
+                shell=Shell(shell_str),
+                verification=VerificationConfig(
+                    command=verify_command,
+                    shell=Shell(verify_shell_str),
+                ),
+            )
+        )
+
+    if not samples:
+        raise ValueError("No valid samples in CSV")
+    return tuple(samples)
+
+
+def _decode_csv_bytes(raw: bytes) -> str:
+    if raw.startswith(b"\xef\xbb\xbf"):
+        raw = raw[3:]
+    for encoding in ("utf-8", "gbk"):
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    raise ValueError("CSV encoding is not UTF-8 or GBK")
 
 
 def _load_yaml(path: Path) -> Any:

@@ -33,6 +33,13 @@ def load_optional_env_file(path: Path | None) -> None:
         load_env_file(default_path)
 
 
+def is_env_configured() -> bool:
+    vmrun = os.getenv("VMRUN_PATH", "")
+    if not vmrun:
+        return False
+    return Path(vmrun).is_file() and bool(os.getenv("VMWARE_GUEST_USER", ""))
+
+
 def _strip_quotes(value: str) -> str:
     if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
         return value[1:-1]
