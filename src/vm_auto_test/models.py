@@ -1,0 +1,195 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from enum import Enum
+from typing import Any, Literal
+
+
+class TestMode(str, Enum):
+    BASELINE = "baseline"
+    AV = "av"
+
+
+class Classification(str, Enum):
+    BASELINE_VALID = "BASELINE_VALID"
+    BASELINE_INVALID = "BASELINE_INVALID"
+    AV_NOT_BLOCKED = "AV_NOT_BLOCKED"
+    AV_BLOCKED_OR_NO_CHANGE = "AV_BLOCKED_OR_NO_CHANGE"
+
+
+class Shell(str, Enum):
+    CMD = "cmd"
+    POWERSHELL = "powershell"
+
+
+class ComparisonKind(str, Enum):
+    CHANGED = "changed"
+    CONTAINS = "contains"
+    REGEX = "regex"
+    JSON_FIELD = "json_field"
+    FILE_HASH = "file_hash"
+
+
+ComparisonTarget = Literal["before", "after"]
+
+
+@dataclass(frozen=True)
+class GuestCredentials:
+    user: str
+    password: str
+
+
+@dataclass(frozen=True)
+class CommandResult:
+    command: str
+    stdout: str = ""
+    stderr: str = ""
+    exit_code: int = 0
+    capture_method: str = "direct"
+
+    @property
+    def combined_output(self) -> str:
+        return "\n".join(part for part in (self.stdout, self.stderr) if part)
+
+
+@dataclass(frozen=True)
+class ComparisonSpec:
+    kind: ComparisonKind
+    target: ComparisonTarget = "after"
+    value: str | None = None
+    pattern: str | None = None
+    path: str | None = None
+    expected: Any | None = None
+
+
+@dataclass(frozen=True)
+class ComparisonResult:
+    kind: ComparisonKind
+    passed: bool
+    detail: str = ""
+    before_value: str | None = None
+    after_value: str | None = None
+
+
+@dataclass(frozen=True)
+class EvaluationResult:
+    changed: bool
+    effect_observed: bool
+    comparisons: tuple[ComparisonResult, ...] = field(default_factory=tuple)
+
+
+@dataclass(frozen=True)
+class VerificationSpec:
+    command: str
+    shell: Shell = Shell.POWERSHELL
+    comparisons: tuple[ComparisonSpec, ...] = field(default_factory=tuple)
+
+
+@dataclass(frozen=True)
+class SampleSpec:
+    id: str
+    command: str
+    shell: Shell = Shell.CMD
+    verification: VerificationSpec | None = None
+
+
+@dataclass(frozen=True)
+class AvLogCollectorSpec:
+    id: str
+    type: str
+    command: str
+    shell: Shell = Shell.POWERSHELL
+
+
+@dataclass(frozen=True)
+class CollectedLog:
+    collector_id: str
+    command: str
+    stdout: str = ""
+    stderr: str = ""
+    exit_code: int = 0
+    capture_method: str = "direct"
+
+
+@dataclass(frozen=True)
+class TestCase:
+    vm_id: str
+    snapshot: str | None
+    mode: TestMode
+    sample_command: str
+    verify_command: str
+    credentials: GuestCredentials
+    verify_shell: Shell = Shell.POWERSHELL
+    sample_shell: Shell = Shell.CMD
+    baseline_result: str | None = None
+    wait_timeout_seconds: int = 180
+    command_timeout_seconds: int = 120
+    normalize_trim: bool = True
+    normalize_ignore_empty_lines: bool = True
+    samples: tuple[SampleSpec, ...] = field(default_factory=tuple)
+    verification: VerificationSpec | None = None
+    av_log_collectors: tuple[AvLogCollectorSpec, ...] = field(default_factory=tuple)
+
+    def effective_samples(self) -> tuple[SampleSpec, ...]:
+        if self.samples:
+            return self.samples
+        return (
+            SampleSpec(
+                id="sample",
+                command=self.sample_command,
+                shell=self.sample_shell,
+            ),
+        )
+
+    def effective_verification(self) -> VerificationSpec:
+        if self.verification is not None:
+            return self.verification
+        return VerificationSpec(command=self.verify_command, shell=self.verify_shell)
+
+
+@dataclass(frozen=True)
+class StepResult:
+    name: str
+    status: str
+    detail: str = ""
+
+
+@dataclass(frozen=True)
+class TestResult:
+    test_case: TestCase
+    report_dir: str
+    before: CommandResult
+    sample: CommandResult
+    after: CommandResult
+    changed: bool
+    classification: Classification
+    steps: tuple[StepResult, ...] = field(default_factory=tuple)
+    evaluation: EvaluationResult | None = None
+    logs: tuple[CollectedLog, ...] = field(default_factory=tuple)
+
+
+@dataclass(frozen=True)
+class SampleTestResult:
+    test_case: TestCase
+    sample_spec: SampleSpec
+    report_dir: str
+    before: CommandResult
+    sample: CommandResult
+    after: CommandResult
+    evaluation: EvaluationResult
+    classification: Classification
+    steps: tuple[StepResult, ...] = field(default_factory=tuple)
+    logs: tuple[CollectedLog, ...] = field(default_factory=tuple)
+
+    @property
+    def changed(self) -> bool:
+        return self.evaluation.changed
+
+
+@dataclass(frozen=True)
+class BatchTestResult:
+    test_case: TestCase
+    report_dir: str
+    samples: tuple[SampleTestResult, ...]
+    classification: Classification
+    steps: tuple[StepResult, ...] = field(default_factory=tuple)

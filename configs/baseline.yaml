@@ -1,0 +1,21 @@
+vm_id: E:\VM-MCP\windows11\Windows 11 x64.vmx
+snapshot: 添加adminstrator密码
+mode: baseline
+guest:
+  user: Administrator
+  password_env: admin123
+verification:
+  command: schtasks /query /tn "SecurityScript" /fo LIST
+  shell: cmd
+reports_dir: reports
+timeouts:
+  wait_guest_seconds: 180
+  command_seconds: 120
+normalize:
+  trim: true
+  ignore_empty_lines: true
+provider:
+  type: vmrun
+sample:
+  command: '"C:\Users\Administrator\Desktop\07-持久化攻击-exe\1-A_schtasks定时任务.exe"'
+  shell: cmd
