@@ -6,7 +6,7 @@ import json
 import pytest
 from pathlib import Path
 
-from vm_auto_test.cli import choose_from_list, choose_value, clean_cli_value, format_cli_error, print_progress
+from vm_auto_test.cli import _BACK, choose_from_list, choose_value, clean_cli_value, format_cli_error, print_progress
 from vm_auto_test.evaluator import normalize_output
 from vm_auto_test.models import Classification, CommandResult, GuestCredentials, Shell, StepResult, TestCase, TestMode
 from vm_auto_test.orchestrator import TestOrchestrator
@@ -217,6 +217,18 @@ def test_choose_from_list_returns_none_for_cancel(monkeypatch):
     monkeypatch.setattr("builtins.input", lambda _: "0")
 
     assert choose_from_list(["clean", "av"]) is None
+
+
+def test_choose_from_list_returns_back_for_b(monkeypatch):
+    monkeypatch.setattr("builtins.input", lambda _: "b")
+
+    assert choose_from_list(["clean", "av"]) is _BACK
+
+
+def test_choose_value_returns_back_for_b(monkeypatch):
+    monkeypatch.setattr("builtins.input", lambda _: "b")
+
+    assert choose_value("模式", ["baseline", "av"]) is _BACK
 
 
 def test_choose_from_list_rejects_out_of_range_selection(monkeypatch):

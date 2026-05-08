@@ -10,6 +10,10 @@
 - Python 3.10+
 - Guest 已安装 VMware Tools
 - `vmrun.exe` 可用（默认路径 `C:\Program Files (x86)\VMware\VMware Workstation\vmrun.exe`）
+- **VM 不能开启访问控制加密**（否则 vmrun 无法列出快照，会超时报错）
+
+如果遇到"无法列出快照"或查询超时，检查 VM 是否启用了加密：
+VMware Workstation → 虚拟机设置 → 选项 → 访问控制 → 移除加密。
 
 ## 安装
 

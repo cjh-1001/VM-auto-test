@@ -37,6 +37,8 @@ from vm_auto_test.orchestrator import TestOrchestrator
 from vm_auto_test.providers.base import VmwareProvider
 from vm_auto_test.providers.factory import create_provider
 
+_BACK = object()
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run VMware guest sample validation tests.")
@@ -46,7 +48,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("vms", help="List running VMs")
 
     snapshot_parser = subparsers.add_parser("snapshots", help="List snapshots for a VM")
-    snapshot_parser.add_argument("--vm", required=True, help="VM ID or .vmx path")
+    snapshot_parser.add_argument("--vm", required=True, nargs="+", help="VM ID or .vmx path (spaces ok)")
 
     run_parser = subparsers.add_parser("run", help="Run baseline or AV validation")
     run_parser.add_argument("--vm", required=True, help="VM ID or .vmx path")
@@ -114,22 +116,30 @@ async def main_async() -> None:
         return
 
     if args.command == "vms":
+        print("  正在查询运行中的 VM ...", flush=True)
         running_vms = await provider.list_running_vms()
         if not running_vms:
-            print("No running VMs found.")
+            print("  没有运行中的 VM")
             return
         for index, vm_id in enumerate(running_vms, start=1):
             print(f"[{index}] {vm_id}")
         return
 
     if args.command == "snapshots":
+        vm_path = " ".join(args.vm) if isinstance(args.vm, list) else args.vm
+        vm_path = clean_cli_value(vm_path)
+        print(f"  正在查询快照: {vm_path}", flush=True)
         orchestrator = TestOrchestrator(provider, Path("reports"))
-        snapshots = await orchestrator.list_snapshots(clean_cli_value(args.vm))
+        try:
+            snapshots = await orchestrator.list_snapshots(vm_path)
+        except RuntimeError as exc:
+            print(f"  {exc}")
+            return
         if not snapshots:
-            print("No snapshots found.")
+            print("  没有找到快照")
             return
         for index, snapshot in enumerate(snapshots, start=1):
-            print(f"[{index}] {snapshot}")
+            print(f"  [{index}] {snapshot}")
         return
 
     if args.command == "run-dir":
@@ -324,8 +334,13 @@ async def _interactive_menu(provider: VmwareProvider, env_file: Path) -> None:
 
         if choice == "4":
             vm_id = clean_cli_value(input("  VM 路径: "))
+            print(f"  正在查询快照 ...", flush=True)
             orchestrator = TestOrchestrator(provider, Path("reports"))
-            snapshots = await orchestrator.list_snapshots(vm_id)
+            try:
+                snapshots = await orchestrator.list_snapshots(vm_id)
+            except RuntimeError as exc:
+                print(f"  {exc}")
+                continue
             if not snapshots:
                 print("  没有找到快照")
             else:
@@ -341,158 +356,346 @@ async def _interactive_menu(provider: VmwareProvider, env_file: Path) -> None:
             print("  无效选项")
 
 
+def _prompt_back(prompt: str) -> str | None:
+    """input() wrapper: returns None on 'b' (go back), strips whitespace."""
+    print("  输入 b 返回上一步")
+    value = input(f"  {prompt}: ").strip()
+    if value.lower() == "b":
+        return None
+    return value
+
+
 async def _interactive_single(provider: VmwareProvider) -> None:
-    # 1. VM
-    running = await provider.list_running_vms()
-    if running:
-        print("\n  —— 选择 VM ——")
-        vm_id = choose_from_list(running, "选择 VM")
-        if vm_id is None:
+    vm_id: str | None = None
+    snapshot: str | None = None
+    mode: TestMode | None = None
+    baseline_result: str | None = None
+    sample_command: str | None = None
+    sample_shell: Shell | None = None
+    verify_command: str | None = None
+    verify_shell: Shell | None = None
+    guest_user: str | None = None
+    guest_password: str | None = None
+
+    step = 0
+    while True:
+        # — step 0: VM —
+        if step == 0:
+            running = await provider.list_running_vms()
+            if running:
+                print("\n  —— 选择 VM ——")
+                result = choose_from_list(running, "选择 VM")
+                if result is None:
+                    return
+                if result is _BACK:
+                    return
+                vm_id = result
+            else:
+                print("\n  —— 输入 VM 路径 ——")
+                result = _prompt_back("VM 路径")
+                if result is None:
+                    continue
+                vm_id = clean_cli_value(result)
+            step = 1
+            continue
+
+        # — step 1: Snapshot —
+        if step == 1:
+            print("  正在查询快照 ...", flush=True)
+            orchestrator = TestOrchestrator(provider, Path("reports"))
+            try:
+                snapshots = await orchestrator.list_snapshots(vm_id)
+            except RuntimeError as exc:
+                print(f"  {exc}")
+                step = 0
+                continue
+            if not snapshots:
+                print("  没有找到快照，请确认 VM 已开机且装有 VMware Tools")
+                step = 0
+                continue
+            print("\n  —— 选择快照 ——")
+            result = choose_from_list(snapshots, "选择快照")
+            if result is None:
+                return
+            if result is _BACK:
+                step = 0
+                continue
+            snapshot = result
+            step = 2
+            continue
+
+        # — step 2: Mode —
+        if step == 2:
+            print("\n  —— 选择模式 ——")
+            print("  baseline = 干净快照，验证样本是否有效（前后输出不同 → 有效）")
+            print("  av       = 带杀软快照，验证杀软能否拦截（需先通过 baseline）")
+            result = choose_value("模式", ["baseline", "av"], default="baseline")
+            if result is _BACK:
+                step = 1
+                continue
+            mode = TestMode(result)
+            baseline_result = None
+            if mode == TestMode.AV:
+                print("  AV 模式需要一份已通过的 baseline 报告（result.json）来确认样本本身有效。")
+                result = _prompt_back("Baseline result.json 路径")
+                if result is None:
+                    step = 1
+                    continue
+                baseline_result = clean_cli_value(result)
+            step = 3
+            continue
+
+        # — step 3: Sample —
+        if step == 3:
+            print("\n  —— 样本命令 ——")
+            result = _prompt_back("样本命令 (例如 C:\\Samples\\sample.exe)")
+            if result is None:
+                step = 2
+                continue
+            sample_command = result
+            result = choose_value("用哪个 shell 执行", ["cmd", "powershell"], default="cmd")
+            if result is _BACK:
+                step = 2
+                continue
+            sample_shell = Shell(result)
+            step = 4
+            continue
+
+        # — step 4: Verify —
+        if step == 4:
+            print("\n  —— 验证命令（样本跑前/跑后各执行一次）——")
+            result = _prompt_back("验证命令")
+            if result is None:
+                step = 3
+                continue
+            verify_command = result
+            result = choose_value("用哪个 shell 执行", ["cmd", "powershell"], default="powershell")
+            if result is _BACK:
+                step = 3
+                continue
+            verify_shell = Shell(result)
+            step = 5
+            continue
+
+        # — step 5: Guest —
+        if step == 5:
+            print("\n  —— Guest 凭据 ——")
+            user = os.getenv("VMWARE_GUEST_USER") or ""
+            if user:
+                print(f"  Guest 用户名 (env): {user}")
+                guest_user = user
+            else:
+                result = _prompt_back("Guest 用户名")
+                if result is None:
+                    step = 4
+                    continue
+                guest_user = result
+            pw = os.getenv("VMWARE_GUEST_PASSWORD")
+            if pw:
+                guest_password = pw
+            else:
+                guest_password = getpass.getpass("  Guest 密码: ")
+            if not guest_password:
+                print("  密码不能为空")
+                continue
+            step = 6
+            continue
+
+        # — step 6: Confirm —
+        if step == 6:
+            print(f"\n  VM:       {vm_id}")
+            print(f"  快照:     {snapshot}")
+            print(f"  模式:     {mode.value}")
+            print(f"  样本:     [{sample_shell.value}] {sample_command}")
+            print(f"  验证:     [{verify_shell.value}] {verify_command}")
+            if baseline_result:
+                print(f"  baseline: {baseline_result}")
+            confirm = input("  确认执行? [y/N]: ").strip().lower()
+            if confirm == "b":
+                step = 5
+                continue
+            if confirm != "y":
+                print("  已取消")
+                return
+
+            test_case = TestCase(
+                vm_id=vm_id, snapshot=snapshot, mode=mode,
+                sample_command=sample_command, sample_shell=sample_shell,
+                verify_command=verify_command, verify_shell=verify_shell,
+                credentials=GuestCredentials(guest_user, guest_password),
+                baseline_result=baseline_result,
+            )
+            orch = TestOrchestrator(provider, Path("reports"), progress=print_progress)
+            result = await orch.run(test_case)
+            print(f"\n  {_classify_cn(result.classification)}")
+            print(f"  报告: {result.report_dir}")
             return
-    else:
-        vm_id = clean_cli_value(input("\n  VM 路径: "))
-
-    # 2. Snapshot
-    orchestrator = TestOrchestrator(provider, Path("reports"))
-    snapshots = await orchestrator.list_snapshots(vm_id)
-    if not snapshots:
-        print("  没有找到快照，请确认 VM 已开机且装有 VMware Tools")
-        return
-    print("\n  —— 选择快照 ——")
-    snapshot = choose_from_list(snapshots, "选择快照")
-    if snapshot is None:
-        return
-
-    # 3. Mode
-    print("\n  —— 选择模式 ——")
-    print("  baseline = 干净快照，验证样本是否有效（前后输出不同 → 有效）")
-    print("  av       = 带杀软快照，验证杀软能否拦截（需先通过 baseline）")
-    mode = TestMode(choose_value("模式", ["baseline", "av"], default="baseline"))
-    baseline_result = None
-    if mode == TestMode.AV:
-        print("  AV 模式需要一份已通过的 baseline 报告（result.json）来确认样本本身有效。")
-        baseline_result = clean_cli_value(input("  Baseline result.json 路径: "))
-
-    # 4. Sample
-    print("\n  —— 样本命令 ——")
-    sample_command = input("  样本命令 (例如 C:\\Samples\\sample.exe): ").strip()
-    sample_shell = Shell(choose_value("  用哪个 shell 执行", ["cmd", "powershell"], default="cmd"))
-
-    # 5. Verify
-    print("\n  —— 验证命令（样本跑前/跑后各执行一次）——")
-    verify_command = input("  验证命令: ").strip()
-    verify_shell = Shell(choose_value("  用哪个 shell 执行", ["cmd", "powershell"], default="powershell"))
-
-    # 6. Guest
-    guest_user = os.getenv("VMWARE_GUEST_USER") or input("  Guest 用户名: ").strip()
-    guest_password = os.getenv("VMWARE_GUEST_PASSWORD") or getpass.getpass("  Guest 密码: ")
-
-    # 7. Confirm & run
-    print(f"\n  VM:       {vm_id}")
-    print(f"  快照:     {snapshot}")
-    print(f"  模式:     {mode.value}")
-    print(f"  样本:     [{sample_shell.value}] {sample_command}")
-    print(f"  验证:     [{verify_shell.value}] {verify_command}")
-    if baseline_result:
-        print(f"  baseline: {baseline_result}")
-    if input("\n  确认执行? [y/N] ").strip().lower() != "y":
-        print("  已取消")
-        return
-
-    test_case = TestCase(
-        vm_id=vm_id, snapshot=snapshot, mode=mode,
-        sample_command=sample_command, sample_shell=sample_shell,
-        verify_command=verify_command, verify_shell=verify_shell,
-        credentials=GuestCredentials(guest_user, guest_password),
-        baseline_result=baseline_result,
-    )
-    orch = TestOrchestrator(provider, Path("reports"), progress=print_progress)
-    result = await orch.run(test_case)
-    print(f"\n  {_classify_cn(result.classification)}")
-    print(f"  报告: {result.report_dir}")
 
 
 async def _interactive_csv(provider: VmwareProvider) -> None:
-    # 1. VM
-    running = await provider.list_running_vms()
-    if running:
-        print("\n  —— 选择 VM ——")
-        vm_id = choose_from_list(running, "选择 VM")
-        if vm_id is None:
+    vm_id: str | None = None
+    snapshot: str | None = None
+    mode: TestMode | None = None
+    baseline_result: str | None = None
+    csv_path: Path | None = None
+    samples_base_dir: str | None = None
+    guest_user: str | None = None
+    guest_password: str | None = None
+
+    step = 0
+    while True:
+        # — step 0: VM —
+        if step == 0:
+            running = await provider.list_running_vms()
+            if running:
+                print("\n  —— 选择 VM ——")
+                result = choose_from_list(running, "选择 VM")
+                if result is None:
+                    return
+                if result is _BACK:
+                    return
+                vm_id = result
+            else:
+                print("\n  —— 输入 VM 路径 ——")
+                result = _prompt_back("VM 路径")
+                if result is None:
+                    continue
+                vm_id = clean_cli_value(result)
+            step = 1
+            continue
+
+        # — step 1: Snapshot —
+        if step == 1:
+            print("  正在查询快照 ...", flush=True)
+            orchestrator = TestOrchestrator(provider, Path("reports"))
+            try:
+                snapshots = await orchestrator.list_snapshots(vm_id)
+            except RuntimeError as exc:
+                print(f"  {exc}")
+                step = 0
+                continue
+            if not snapshots:
+                print("  没有找到快照，请确认 VM 已开机且装有 VMware Tools")
+                step = 0
+                continue
+            print("\n  —— 选择快照 ——")
+            result = choose_from_list(snapshots, "选择快照")
+            if result is None:
+                return
+            if result is _BACK:
+                step = 0
+                continue
+            snapshot = result
+            step = 2
+            continue
+
+        # — step 2: Mode —
+        if step == 2:
+            print("\n  —— 选择模式 ——")
+            print("  baseline = 干净快照，验证样本是否有效（前后输出不同 → 有效）")
+            print("  av       = 带杀软快照，验证杀软能否拦截（需先通过 baseline）")
+            result = choose_value("模式", ["baseline", "av"], default="baseline")
+            if result is _BACK:
+                step = 1
+                continue
+            mode = TestMode(result)
+            baseline_result = None
+            if mode == TestMode.AV:
+                print("  AV 模式需要一份已通过的 baseline 报告（result.json）来确认样本本身有效。")
+                result = _prompt_back("Baseline result.json 路径")
+                if result is None:
+                    step = 1
+                    continue
+                baseline_result = clean_cli_value(result)
+            step = 3
+            continue
+
+        # — step 3: CSV —
+        if step == 3:
+            print("\n  —— CSV 配置 ——")
+            result = _prompt_back("CSV 文件路径")
+            if result is None:
+                step = 2
+                continue
+            csv_path = Path(clean_cli_value(result))
+            result = _prompt_back("VM 上样本目录 (绝对路径则留空)")
+            if result is None:
+                step = 2
+                continue
+            samples_base_dir = result or None
+            step = 4
+            continue
+
+        # — step 4: Guest —
+        if step == 4:
+            print("\n  —— Guest 凭据 ——")
+            user = os.getenv("VMWARE_GUEST_USER") or ""
+            if user:
+                print(f"  Guest 用户名 (env): {user}")
+                guest_user = user
+            else:
+                result = _prompt_back("Guest 用户名")
+                if result is None:
+                    step = 3
+                    continue
+                guest_user = result
+            pw = os.getenv("VMWARE_GUEST_PASSWORD")
+            if pw:
+                guest_password = pw
+            else:
+                guest_password = getpass.getpass("  Guest 密码: ")
+            if not guest_password:
+                print("  密码不能为空")
+                continue
+            step = 5
+            continue
+
+        # — step 5: Parse & Confirm —
+        if step == 5:
+            sample_configs = parse_csv_samples(csv_path, samples_base_dir=samples_base_dir)
+            print(f"\n  从 CSV 读取 {len(sample_configs)} 个样本:")
+            for cfg in sample_configs:
+                print(f"    [{cfg.shell.value}] {cfg.command}")
+                print(f"      verify: [{cfg.verification.shell.value}] {cfg.verification.command}")
+            print(f"  VM:       {vm_id}")
+            print(f"  快照:     {snapshot}")
+            print(f"  模式:     {mode.value}")
+            if baseline_result:
+                print(f"  baseline: {baseline_result}")
+            confirm = input("  确认执行? [y/N]: ").strip().lower()
+            if confirm == "b":
+                step = 4
+                continue
+            if confirm != "y":
+                print("  已取消")
+                return
+
+            sample_specs: list[SampleSpec] = []
+            for cfg in sample_configs:
+                v = cfg.verification
+                sample_specs.append(SampleSpec(
+                    id=cfg.id, command=cfg.command, shell=cfg.shell,
+                    verification=VerificationSpec(command=v.command, shell=v.shell),
+                ))
+            first_v = sample_specs[0].verification
+            test_case = TestCase(
+                vm_id=vm_id, snapshot=snapshot, mode=mode,
+                sample_command=sample_configs[0].command,
+                sample_shell=sample_configs[0].shell,
+                verify_command=first_v.command if first_v else "",
+                verify_shell=first_v.shell if first_v else Shell.POWERSHELL,
+                credentials=GuestCredentials(guest_user, guest_password),
+                baseline_result=baseline_result,
+                samples=tuple(sample_specs),
+                verification=first_v or VerificationSpec(command="", shell=Shell.POWERSHELL),
+            )
+            orch = TestOrchestrator(provider, Path("reports"), progress=print_progress)
+            batch_result = await orch.run_batch(test_case)
+            print(f"\n  {_classify_cn(batch_result.classification)}  ({batch_result.classification.value})  共 {len(batch_result.samples)} 个样本")
+            for s in batch_result.samples:
+                print(f"    {s.sample_spec.id}  {_classify_cn(s.classification, short=True)}")
+            print(f"  报告: {batch_result.report_dir}")
             return
-    else:
-        vm_id = clean_cli_value(input("\n  VM 路径: "))
-
-    # 2. Snapshot
-    orchestrator = TestOrchestrator(provider, Path("reports"))
-    snapshots = await orchestrator.list_snapshots(vm_id)
-    if not snapshots:
-        print("  没有找到快照，请确认 VM 已开机且装有 VMware Tools")
-        return
-    print("\n  —— 选择快照 ——")
-    snapshot = choose_from_list(snapshots, "选择快照")
-    if snapshot is None:
-        return
-
-    # 3. Mode
-    print("\n  —— 选择模式 ——")
-    print("  baseline = 干净快照，验证样本是否有效（前后输出不同 → 有效）")
-    print("  av       = 带杀软快照，验证杀软能否拦截（需先通过 baseline）")
-    mode = TestMode(choose_value("模式", ["baseline", "av"], default="baseline"))
-    baseline_result = None
-    if mode == TestMode.AV:
-        print("  AV 模式需要一份已通过的 baseline 报告（result.json）来确认样本本身有效。")
-        baseline_result = clean_cli_value(input("  Baseline result.json 路径: "))
-
-    # 4. CSV
-    csv_path = Path(clean_cli_value(input("\n  CSV 文件路径: ").strip()))
-    samples_base_dir = input("  VM 上样本目录 (回车跳过): ").strip() or None
-
-    # 5. Guest
-    guest_user = os.getenv("VMWARE_GUEST_USER") or input("  Guest 用户名: ").strip()
-    guest_password = os.getenv("VMWARE_GUEST_PASSWORD") or getpass.getpass("  Guest 密码: ")
-
-    # 6. Parse & confirm
-    sample_configs = parse_csv_samples(csv_path, samples_base_dir=samples_base_dir)
-    print(f"\n  从 CSV 读取 {len(sample_configs)} 个样本:")
-    for cfg in sample_configs:
-        print(f"    [{cfg.shell.value}] {cfg.command}")
-        print(f"      verify: [{cfg.verification.shell.value}] {cfg.verification.command}")
-    print(f"  VM:       {vm_id}")
-    print(f"  快照:     {snapshot}")
-    print(f"  模式:     {mode.value}")
-    if baseline_result:
-        print(f"  baseline: {baseline_result}")
-    if input("\n  确认执行? [y/N] ").strip().lower() != "y":
-        print("  已取消")
-        return
-
-    # 7. Run
-    sample_specs: list[SampleSpec] = []
-    for cfg in sample_configs:
-        v = cfg.verification
-        sample_specs.append(SampleSpec(
-            id=cfg.id, command=cfg.command, shell=cfg.shell,
-            verification=VerificationSpec(command=v.command, shell=v.shell),
-        ))
-    first_v = sample_specs[0].verification
-    test_case = TestCase(
-        vm_id=vm_id, snapshot=snapshot, mode=mode,
-        sample_command=sample_configs[0].command,
-        sample_shell=sample_configs[0].shell,
-        verify_command=first_v.command if first_v else "",
-        verify_shell=first_v.shell if first_v else Shell.POWERSHELL,
-        credentials=GuestCredentials(guest_user, guest_password),
-        baseline_result=baseline_result,
-        samples=tuple(sample_specs),
-        verification=first_v or VerificationSpec(command="", shell=Shell.POWERSHELL),
-    )
-    orch = TestOrchestrator(provider, Path("reports"), progress=print_progress)
-    batch_result = await orch.run_batch(test_case)
-    print(f"\n  {_classify_cn(batch_result.classification)}  ({batch_result.classification.value})  共 {len(batch_result.samples)} 个样本")
-    for s in batch_result.samples:
-        print(f"    {s.sample_spec.id}  {_classify_cn(s.classification, short=True)}")
-    print(f"  报告: {batch_result.report_dir}")
 
 
 async def _interactive_setup(env_file: Path) -> None:
@@ -639,12 +842,15 @@ def clean_cli_value(value: str) -> str:
 
 
 def choose_from_list(items: list[str], label: str = "选择") -> str | None:
-    print(f"  [0] 返回")
+    print(f"  [0] 返回主菜单")
     for index, item in enumerate(items, start=1):
         print(f"  [{index}] {item}")
-    raw_selection = input(f"  {label}: ").strip()
+    print("  输入数字选择，b 回上一步")
+    raw_selection = input(f"  {label}: ").strip().lower()
     if raw_selection == "0":
         return None
+    if raw_selection == "b":
+        return _BACK
     try:
         selected_index = int(raw_selection)
     except ValueError as exc:
@@ -656,9 +862,12 @@ def choose_from_list(items: list[str], label: str = "选择") -> str | None:
 
 def choose_value(label: str, values: list[str], default: str | None = None) -> str:
     for index, value in enumerate(values, start=1):
-        default_marker = " default" if value == default else ""
-        print(f"[{index}] {value}{default_marker}")
-    raw_selection = input(f"{label}: ").strip()
+        default_marker = " (默认)" if value == default else ""
+        print(f"  [{index}] {value}{default_marker}")
+    print("  输入数字选择，b 回上一步")
+    raw_selection = input(f"  {label}: ").strip().lower()
+    if raw_selection == "b":
+        return _BACK
     if not raw_selection and default:
         return default
     try:
@@ -675,7 +884,7 @@ def format_cli_error(exc: Exception) -> str:
         return str(exc)
     if isinstance(exc, RuntimeError):
         message = str(exc)
-        if message.startswith("vmrun.exe not found:"):
+        if message.startswith("vmrun.exe not found:") or message.startswith("无法列出快照"):
             return message
     return f"{type(exc).__name__}: operation failed"
 

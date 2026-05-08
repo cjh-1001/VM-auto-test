@@ -78,8 +78,25 @@ class VmrunProvider(VmwareProvider):
             return lines[1:]
         return lines
 
+    _SNAPSHOT_TIMEOUT = 5  # seconds — vmrun hangs on encrypted VMs
+
     async def list_snapshots(self, vm_id: str) -> list[str]:
-        output = await self._vmrun.list_snapshots(vm_id)
+        try:
+            output = await asyncio.wait_for(self._vmrun.list_snapshots(vm_id), timeout=self._SNAPSHOT_TIMEOUT)
+        except asyncio.TimeoutError:
+            raise RuntimeError(
+                "无法列出快照：查询超时（5s）。\n"
+                "如果 VM 开启了访问控制加密，请在 VMware Workstation 中关闭该 VM → "
+                "虚拟机设置 → 选项 → 访问控制 → 移除加密。"
+            )
+        except RuntimeError as exc:
+            message = str(exc)
+            if any(kw in message.lower() for kw in ("encrypt", "access control")):
+                raise RuntimeError(
+                    "无法列出快照：VM 开启了访问控制加密。\n"
+                    "请在 VMware Workstation 中关闭该 VM → 虚拟机设置 → 选项 → 访问控制 → 移除加密。"
+                ) from exc
+            raise
         return [
             line.strip()
             for line in output.splitlines()
