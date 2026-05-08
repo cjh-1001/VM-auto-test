@@ -143,8 +143,11 @@ async def main_async() -> None:
         if not snapshot:
             snapshots_list = await run_dir_orchestrator.list_snapshots(vm_id)
             if not snapshots_list:
-                raise RuntimeError("No snapshots found for VM")
-            snapshot = choose_snapshot(snapshots_list)
+                raise RuntimeError("没有找到快照，请确认 VM 已开机且装有 VMware Tools")
+            snapshot = choose_from_list(snapshots_list, "选择快照")
+            if snapshot is None:
+                print("已取消")
+                return
 
         guest_user = args.guest_user or os.getenv("VMWARE_GUEST_USER", "") or input("Guest user: ")
         guest_password = args.guest_password or os.getenv("VMWARE_GUEST_PASSWORD")
@@ -188,8 +191,11 @@ async def main_async() -> None:
         if not snapshot:
             snapshots_list = await csv_orchestrator.list_snapshots(vm_id)
             if not snapshots_list:
-                raise RuntimeError("No snapshots found for VM")
-            snapshot = choose_snapshot(snapshots_list)
+                raise RuntimeError("没有找到快照，请确认 VM 已开机且装有 VMware Tools")
+            snapshot = choose_from_list(snapshots_list, "选择快照")
+            if snapshot is None:
+                print("已取消")
+                return
 
         guest_user = args.guest_user or os.getenv("VMWARE_GUEST_USER", "") or input("Guest user: ")
         guest_password = args.guest_password or os.getenv("VMWARE_GUEST_PASSWORD")
@@ -259,8 +265,11 @@ async def main_async() -> None:
     if not snapshot:
         snapshots = await orchestrator.list_snapshots(vm_id)
         if not snapshots:
-            raise RuntimeError("No snapshots found for VM")
-        snapshot = choose_snapshot(snapshots)
+            raise RuntimeError("没有找到快照，请确认 VM 已开机且装有 VMware Tools")
+        snapshot = choose_from_list(snapshots, "选择快照")
+        if snapshot is None:
+            print("已取消")
+            return
 
     guest_user = args.guest_user or os.getenv("VMWARE_GUEST_USER", "") or input("Guest user: ")
     guest_password = args.guest_password or os.getenv("VMWARE_GUEST_PASSWORD")
@@ -286,65 +295,76 @@ async def main_async() -> None:
 
 
 async def _interactive_menu(provider: VmwareProvider, env_file: Path) -> None:
-    print("\n  VM Auto Test")
-    print("  [1] 测试单样本")
-    print("  [2] 测试多样本 (CSV)")
-    print("  [3] 列出 VM")
-    print("  [4] 列出快照")
-    print("  [5] 重新配置环境")
-    choice = input("\n  > ").strip()
+    while True:
+        print("\n  —— VM Auto Test ——")
+        print("  [0] 退出")
+        print("  [1] 测试单样本")
+        print("  [2] 测试多样本 (CSV)")
+        print("  [3] 列出 VM")
+        print("  [4] 列出快照")
+        print("  [5] 重新配置环境")
+        choice = input("\n  > ").strip()
 
-    if choice == "5":
-        await _interactive_setup(env_file)
-        return
+        if choice == "0":
+            print("  已退出")
+            return
 
-    if choice == "3":
-        vms = await provider.list_running_vms()
-        if not vms:
-            print("No running VMs found.")
+        if choice == "5":
+            await _interactive_setup(env_file)
+            continue
+
+        if choice == "3":
+            vms = await provider.list_running_vms()
+            if not vms:
+                print("  没有运行中的 VM")
+            else:
+                for i, vm in enumerate(vms, 1):
+                    print(f"  [{i}] {vm}")
+            continue
+
+        if choice == "4":
+            vm_id = clean_cli_value(input("  VM 路径: "))
+            orchestrator = TestOrchestrator(provider, Path("reports"))
+            snapshots = await orchestrator.list_snapshots(vm_id)
+            if not snapshots:
+                print("  没有找到快照")
+            else:
+                for i, s in enumerate(snapshots, 1):
+                    print(f"  [{i}] {s}")
+            continue
+
+        if choice == "1":
+            await _interactive_single(provider)
+        elif choice == "2":
+            await _interactive_csv(provider)
         else:
-            for i, vm in enumerate(vms, 1):
-                print(f"[{i}] {vm}")
-        return
-
-    if choice == "4":
-        vm_id = clean_cli_value(input("VM path: "))
-        orchestrator = TestOrchestrator(provider, Path("reports"))
-        snapshots = await orchestrator.list_snapshots(vm_id)
-        if not snapshots:
-            print("No snapshots found.")
-        else:
-            for i, s in enumerate(snapshots, 1):
-                print(f"[{i}] {s}")
-        return
-
-    if choice == "1":
-        await _interactive_single(provider)
-    elif choice == "2":
-        await _interactive_csv(provider)
-    else:
-        print("Invalid choice")
+            print("  无效选项")
 
 
 async def _interactive_single(provider: VmwareProvider) -> None:
     # 1. VM
     running = await provider.list_running_vms()
     if running:
-        print("\n-- 选择 VM --")
-        vm_id = choose_snapshot(running)
+        print("\n  —— 选择 VM ——")
+        vm_id = choose_from_list(running, "选择 VM")
+        if vm_id is None:
+            return
     else:
-        vm_id = clean_cli_value(input("\nVM path: "))
+        vm_id = clean_cli_value(input("\n  VM 路径: "))
 
     # 2. Snapshot
     orchestrator = TestOrchestrator(provider, Path("reports"))
     snapshots = await orchestrator.list_snapshots(vm_id)
     if not snapshots:
-        raise RuntimeError("No snapshots found")
-    print("\n-- 选择快照 --")
-    snapshot = choose_snapshot(snapshots)
+        print("  没有找到快照，请确认 VM 已开机且装有 VMware Tools")
+        return
+    print("\n  —— 选择快照 ——")
+    snapshot = choose_from_list(snapshots, "选择快照")
+    if snapshot is None:
+        return
 
     # 3. Mode
-    print("\n-- 选择模式 --")
+    print("\n  —— 选择模式 ——")
     print("  baseline = 干净快照，验证样本是否有效（前后输出不同 → 有效）")
     print("  av       = 带杀软快照，验证杀软能否拦截（需先通过 baseline）")
     mode = TestMode(choose_value("模式", ["baseline", "av"], default="baseline"))
@@ -354,18 +374,18 @@ async def _interactive_single(provider: VmwareProvider) -> None:
         baseline_result = clean_cli_value(input("  Baseline result.json 路径: "))
 
     # 4. Sample
-    print("\n-- 样本命令 --")
-    sample_command = input("样本命令 (例如 C:\\Samples\\sample.exe): ").strip()
-    sample_shell = Shell(choose_value("用哪个 shell 执行", ["cmd", "powershell"], default="cmd"))
+    print("\n  —— 样本命令 ——")
+    sample_command = input("  样本命令 (例如 C:\\Samples\\sample.exe): ").strip()
+    sample_shell = Shell(choose_value("  用哪个 shell 执行", ["cmd", "powershell"], default="cmd"))
 
     # 5. Verify
-    print("\n-- 验证命令（样本跑前/跑后各执行一次）--")
-    verify_command = input("验证命令: ").strip()
-    verify_shell = Shell(choose_value("用哪个 shell 执行", ["cmd", "powershell"], default="powershell"))
+    print("\n  —— 验证命令（样本跑前/跑后各执行一次）——")
+    verify_command = input("  验证命令: ").strip()
+    verify_shell = Shell(choose_value("  用哪个 shell 执行", ["cmd", "powershell"], default="powershell"))
 
     # 6. Guest
-    guest_user = os.getenv("VMWARE_GUEST_USER") or input("Guest 用户名: ").strip()
-    guest_password = os.getenv("VMWARE_GUEST_PASSWORD") or getpass.getpass("Guest 密码: ")
+    guest_user = os.getenv("VMWARE_GUEST_USER") or input("  Guest 用户名: ").strip()
+    guest_password = os.getenv("VMWARE_GUEST_PASSWORD") or getpass.getpass("  Guest 密码: ")
 
     # 7. Confirm & run
     print(f"\n  VM:       {vm_id}")
@@ -376,7 +396,7 @@ async def _interactive_single(provider: VmwareProvider) -> None:
     if baseline_result:
         print(f"  baseline: {baseline_result}")
     if input("\n  确认执行? [y/N] ").strip().lower() != "y":
-        print("已取消")
+        print("  已取消")
         return
 
     test_case = TestCase(
@@ -388,8 +408,7 @@ async def _interactive_single(provider: VmwareProvider) -> None:
     )
     orch = TestOrchestrator(provider, Path("reports"), progress=print_progress)
     result = await orch.run(test_case)
-    print(f"\n  结果: {_classify_cn(result.classification)}")
-    print(f"  分类: {result.classification.value}  changed={result.changed}")
+    print(f"\n  {_classify_cn(result.classification)}")
     print(f"  报告: {result.report_dir}")
 
 
@@ -397,21 +416,26 @@ async def _interactive_csv(provider: VmwareProvider) -> None:
     # 1. VM
     running = await provider.list_running_vms()
     if running:
-        print("\n-- 选择 VM --")
-        vm_id = choose_snapshot(running)
+        print("\n  —— 选择 VM ——")
+        vm_id = choose_from_list(running, "选择 VM")
+        if vm_id is None:
+            return
     else:
-        vm_id = clean_cli_value(input("\nVM path: "))
+        vm_id = clean_cli_value(input("\n  VM 路径: "))
 
     # 2. Snapshot
     orchestrator = TestOrchestrator(provider, Path("reports"))
     snapshots = await orchestrator.list_snapshots(vm_id)
     if not snapshots:
-        raise RuntimeError("No snapshots found")
-    print("\n-- 选择快照 --")
-    snapshot = choose_snapshot(snapshots)
+        print("  没有找到快照，请确认 VM 已开机且装有 VMware Tools")
+        return
+    print("\n  —— 选择快照 ——")
+    snapshot = choose_from_list(snapshots, "选择快照")
+    if snapshot is None:
+        return
 
     # 3. Mode
-    print("\n-- 选择模式 --")
+    print("\n  —— 选择模式 ——")
     print("  baseline = 干净快照，验证样本是否有效（前后输出不同 → 有效）")
     print("  av       = 带杀软快照，验证杀软能否拦截（需先通过 baseline）")
     mode = TestMode(choose_value("模式", ["baseline", "av"], default="baseline"))
@@ -421,12 +445,12 @@ async def _interactive_csv(provider: VmwareProvider) -> None:
         baseline_result = clean_cli_value(input("  Baseline result.json 路径: "))
 
     # 4. CSV
-    csv_path = Path(clean_cli_value(input("\nCSV 文件路径: ").strip()))
-    samples_base_dir = input("VM 上样本目录 (回车跳过): ").strip() or None
+    csv_path = Path(clean_cli_value(input("\n  CSV 文件路径: ").strip()))
+    samples_base_dir = input("  VM 上样本目录 (回车跳过): ").strip() or None
 
     # 5. Guest
-    guest_user = os.getenv("VMWARE_GUEST_USER") or input("Guest 用户名: ").strip()
-    guest_password = os.getenv("VMWARE_GUEST_PASSWORD") or getpass.getpass("Guest 密码: ")
+    guest_user = os.getenv("VMWARE_GUEST_USER") or input("  Guest 用户名: ").strip()
+    guest_password = os.getenv("VMWARE_GUEST_PASSWORD") or getpass.getpass("  Guest 密码: ")
 
     # 6. Parse & confirm
     sample_configs = parse_csv_samples(csv_path, samples_base_dir=samples_base_dir)
@@ -440,7 +464,7 @@ async def _interactive_csv(provider: VmwareProvider) -> None:
     if baseline_result:
         print(f"  baseline: {baseline_result}")
     if input("\n  确认执行? [y/N] ").strip().lower() != "y":
-        print("已取消")
+        print("  已取消")
         return
 
     # 7. Run
@@ -550,7 +574,7 @@ async def build_config_interactively(
     snapshots = await provider.list_snapshots(selected_vm_id)
     if not snapshots:
         raise RuntimeError("No snapshots found for VM")
-    snapshot = choose_snapshot(snapshots)
+    snapshot = choose_from_list(snapshots, "选择快照")
 
     mode = TestMode(mode_value or choose_value("Mode", [mode.value for mode in TestMode]))
     baseline_result = None
@@ -614,17 +638,20 @@ def clean_cli_value(value: str) -> str:
     return cleaned
 
 
-def choose_snapshot(snapshots: list[str]) -> str:
-    for index, item in enumerate(snapshots, start=1):
-        print(f"[{index}] {item}")
-    raw_selection = input("Select snapshot: ").strip()
+def choose_from_list(items: list[str], label: str = "选择") -> str | None:
+    print(f"  [0] 返回")
+    for index, item in enumerate(items, start=1):
+        print(f"  [{index}] {item}")
+    raw_selection = input(f"  {label}: ").strip()
+    if raw_selection == "0":
+        return None
     try:
         selected_index = int(raw_selection)
     except ValueError as exc:
-        raise ValueError("Snapshot selection must be a number") from exc
-    if selected_index < 1 or selected_index > len(snapshots):
-        raise ValueError(f"Snapshot selection must be between 1 and {len(snapshots)}")
-    return snapshots[selected_index - 1]
+        raise ValueError("选项必须是数字") from exc
+    if selected_index < 1 or selected_index > len(items):
+        raise ValueError(f"选项必须在 1 到 {len(items)} 之间")
+    return items[selected_index - 1]
 
 
 def choose_value(label: str, values: list[str], default: str | None = None) -> str:
@@ -637,9 +664,9 @@ def choose_value(label: str, values: list[str], default: str | None = None) -> s
     try:
         selected_index = int(raw_selection)
     except ValueError as exc:
-        raise ValueError(f"{label} selection must be a number") from exc
+        raise ValueError("选项必须是数字") from exc
     if selected_index < 1 or selected_index > len(values):
-        raise ValueError(f"{label} selection must be between 1 and {len(values)}")
+        raise ValueError(f"选项必须在 1 到 {len(values)} 之间")
     return values[selected_index - 1]
 
 

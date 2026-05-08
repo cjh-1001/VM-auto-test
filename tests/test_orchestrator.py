@@ -6,7 +6,7 @@ import json
 import pytest
 from pathlib import Path
 
-from vm_auto_test.cli import choose_snapshot, choose_value, clean_cli_value, format_cli_error, print_progress
+from vm_auto_test.cli import choose_from_list, choose_value, clean_cli_value, format_cli_error, print_progress
 from vm_auto_test.evaluator import normalize_output
 from vm_auto_test.models import Classification, CommandResult, GuestCredentials, Shell, StepResult, TestCase, TestMode
 from vm_auto_test.orchestrator import TestOrchestrator
@@ -207,24 +207,30 @@ def test_clean_cli_value_strips_surrounding_quotes():
     assert clean_cli_value('"E:\\VM-MCP\\windows11\\Windows 11 x64.vmx"') == "E:\\VM-MCP\\windows11\\Windows 11 x64.vmx"
 
 
-def test_choose_snapshot_returns_selected_item(monkeypatch):
+def test_choose_from_list_returns_selected_item(monkeypatch):
     monkeypatch.setattr("builtins.input", lambda _: "2")
 
-    assert choose_snapshot(["clean", "av"]) == "av"
+    assert choose_from_list(["clean", "av"]) == "av"
 
 
-def test_choose_snapshot_rejects_out_of_range_selection(monkeypatch):
+def test_choose_from_list_returns_none_for_cancel(monkeypatch):
+    monkeypatch.setattr("builtins.input", lambda _: "0")
+
+    assert choose_from_list(["clean", "av"]) is None
+
+
+def test_choose_from_list_rejects_out_of_range_selection(monkeypatch):
     monkeypatch.setattr("builtins.input", lambda _: "3")
 
-    with pytest.raises(ValueError, match="between 1 and 2"):
-        choose_snapshot(["clean", "av"])
+    with pytest.raises(ValueError, match="在 1 到 2"):
+        choose_from_list(["clean", "av"])
 
 
-def test_choose_snapshot_rejects_non_numeric_selection(monkeypatch):
+def test_choose_from_list_rejects_non_numeric_selection(monkeypatch):
     monkeypatch.setattr("builtins.input", lambda _: "clean")
 
-    with pytest.raises(ValueError, match="must be a number"):
-        choose_snapshot(["clean", "av"])
+    with pytest.raises(ValueError, match="必须是数字"):
+        choose_from_list(["clean", "av"])
 
 
 def test_choose_value_returns_default_for_empty_selection(monkeypatch):
