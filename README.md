@@ -47,8 +47,8 @@ net user testuser /active:yes
 
 | 要素 | 说明 | 示例 |
 |---|---|---|
-| 样本 | 待执行的 PE 文件 | `1.exe` |
-| 样本路径 | Guest 中样本存放的路径 | `C:\Samples\1.exe` |
+| 样本 | 待执行的 PE 文件 | `sample.exe` |
+| 样本路径 | Guest 中样本存放的路径 | `C:\Samples\sample.exe` |
 | 验证命令 | 执行样本前后各跑一次，用于判断样本是否生效 | `hostname` 或 `schtasks /query` |
 
 框架行为：**执行前跑一次验证命令 → 执行样本 → 执行后再跑一次验证命令 → 比对前后输出**。验证命令的输出变化是判定样本是否有效的依据。
@@ -94,7 +94,7 @@ copy .env.example .env
   [5] 重新配置环境
 ```
 
-全程逐步引导。样本默认 cmd 执行。
+全程逐步引导。样本默认 `cmd` 执行。
 
 ### 配置 Guest 凭证
 
@@ -164,7 +164,7 @@ Excel 编辑，3 列，保存为 **CSV UTF-8**：
 
 | 列 | 含义 | 示例 |
 |---|---|---|
-| `sample_file` | 样本文件名 | `1.exe` |
+| `sample_file` | 样本绝对路径 | `sample.exe` |
 | `verify_command` | 验证命令 | `hostname` |
 | `verify_shell` | 验证命令的 shell | `cmd` |
 
@@ -251,9 +251,9 @@ pytest
 python -m compileall -q src tests
 ```
 
-当前 88 个测试，使用 fake provider，不需要真实 VMware 环境。
+当前 88 个测试，使用 `fake provider`，不需要真实 VMware 环境。
 
-真实 VMware smoke test（无害链路检查：列快照、启动、等 Tools、跑 `hostname`）：
+真实 `VMware smoke test`（无害链路检查：列快照、启动、等 Tools、跑 `hostname`）：
 
 ```bash
 vm-auto-test-smoke
