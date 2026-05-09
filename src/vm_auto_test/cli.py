@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import getpass
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -44,6 +45,7 @@ from vm_auto_test.providers.base import VmToolsNotReadyError, VmwareProvider
 from vm_auto_test.providers.factory import create_provider
 
 _BACK = object()
+_ENV_VAR_RE = re.compile(r"%([^%]+)%")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -111,11 +113,11 @@ def build_parser() -> argparse.ArgumentParser:
 async def main_async() -> None:
     parser = build_parser()
     args = parser.parse_args()
-    load_optional_env_file(Path(args.env_file) if args.env_file else None)
+    load_optional_env_file(Path(clean_cli_value(args.env_file)) if args.env_file else None)
     provider = create_provider("vmrun")
 
     if args.command is None:
-        env_path = Path(args.env_file) if args.env_file else Path(".env")
+        env_path = Path(clean_cli_value(args.env_file)) if args.env_file else Path(".env")
         if not is_env_configured():
             await _interactive_setup(env_path)
         await _interactive_menu(provider, env_path)
@@ -149,11 +151,11 @@ async def main_async() -> None:
         return
 
     if args.command == "run-dir":
-        sample_dir = Path(args.dir)
+        sample_dir = Path(clean_cli_value(args.dir))
         globs = (args.pattern,) if args.pattern else None
         sample_configs = scan_samples_from_directory(sample_dir) if globs is None else scan_samples_from_directory(sample_dir, globs=globs)
 
-        run_dir_orchestrator = TestOrchestrator(provider, Path(args.reports_dir), progress=print_progress)
+        run_dir_orchestrator = TestOrchestrator(provider, Path(clean_cli_value(args.reports_dir)), progress=print_progress)
         vm_id = clean_cli_value(args.vm)
         snapshot = clean_cli_value(args.snapshot) if args.snapshot else None
         if not snapshot:
@@ -204,11 +206,11 @@ async def main_async() -> None:
         return
 
     if args.command == "run-csv":
-        csv_path = Path(args.csv)
-        sample_configs = parse_csv_samples(csv_path, samples_base_dir=args.samples_base_dir)
+        csv_path = Path(clean_cli_value(args.csv))
+        sample_configs = parse_csv_samples(csv_path, samples_base_dir=clean_cli_value(args.samples_base_dir) if args.samples_base_dir else None)
         print(f"Loaded {len(sample_configs)} samples from {csv_path}")
 
-        csv_orchestrator = TestOrchestrator(provider, Path(args.reports_dir), progress=print_progress)
+        csv_orchestrator = TestOrchestrator(provider, Path(clean_cli_value(args.reports_dir)), progress=print_progress)
         vm_id = clean_cli_value(args.vm)
         snapshot = clean_cli_value(args.snapshot) if args.snapshot else None
         if not snapshot:
@@ -264,14 +266,15 @@ async def main_async() -> None:
         return
 
     if args.command == "init-config":
-        config = await build_config_interactively(provider, args.vm, args.mode, samples_dir=args.samples_dir)
-        output = Path(args.output)
+        samples_dir_value = clean_cli_value(args.samples_dir) if args.samples_dir else None
+        config = await build_config_interactively(provider, args.vm, args.mode, samples_dir=samples_dir_value)
+        output = Path(clean_cli_value(args.output))
         write_config(output, config)
         print(f"config={output}")
         return
 
     if args.command == "run-config":
-        config = load_config(Path(args.config))
+        config = load_config(Path(clean_cli_value(args.config)))
         config_provider = create_provider(config.provider.type)
         test_case = to_test_case(config, password=args.guest_password)
         config_orchestrator = TestOrchestrator(config_provider, Path(config.reports_dir), progress=print_progress)
@@ -291,7 +294,7 @@ async def main_async() -> None:
         print(f"report_dir={result.report_dir}")
         return
 
-    orchestrator = TestOrchestrator(provider, Path(args.reports_dir), progress=print_progress)
+    orchestrator = TestOrchestrator(provider, Path(clean_cli_value(args.reports_dir)), progress=print_progress)
     vm_id = clean_cli_value(args.vm)
     snapshot = clean_cli_value(args.snapshot) if args.snapshot else None
     if not snapshot:
@@ -631,6 +634,12 @@ async def _interactive_single(provider: VmwareProvider) -> None:
                 continue
             guest_user = creds.user
             guest_password = creds.password
+            # Resolve env vars in verify command (e.g. %APPDATA%)
+            resolved = await _resolve_env_vars_in_command(
+                provider, vm_id, verify_command, creds,
+            )
+            if resolved != verify_command:
+                verify_command = resolved
             step = 6
             continue
 
@@ -758,7 +767,7 @@ async def _interactive_csv(provider: VmwareProvider) -> None:
             if result is None:
                 step = 2
                 continue
-            samples_base_dir = result or None
+            samples_base_dir = clean_cli_value(result) if result else None
             step = 4
             continue
 
@@ -774,9 +783,42 @@ async def _interactive_csv(provider: VmwareProvider) -> None:
             step = 5
             continue
 
-        # — step 5: Parse & Confirm —
+        # — step 5: Parse, Resolve Env Vars & Confirm —
         if step == 5:
-            sample_configs = parse_csv_samples(csv_path, samples_base_dir=samples_base_dir)
+            sample_configs_raw = parse_csv_samples(csv_path, samples_base_dir=samples_base_dir)
+            creds_obj = GuestCredentials(guest_user, guest_password)
+
+            # Check if any verify command has %VAR% — query active user once
+            has_env_vars = any(
+                cfg.verification and cfg.verification.command
+                and _ENV_VAR_RE.search(cfg.verification.command)
+                for cfg in sample_configs_raw
+            )
+            active_user = None
+            if has_env_vars:
+                active_user = await _query_active_user(provider, vm_id, creds_obj)
+
+            sample_configs: list = []
+            for cfg in sample_configs_raw:
+                v_resolved = cfg.verification
+                if cfg.verification and cfg.verification.command:
+                    resolved_cmd = await _resolve_env_vars_in_command(
+                        provider, vm_id,
+                        cfg.verification.command,
+                        creds_obj,
+                        active_user=active_user,
+                    )
+                    if resolved_cmd != cfg.verification.command:
+                        v_resolved = VerificationConfig(
+                            command=resolved_cmd,
+                            shell=cfg.verification.shell,
+                        )
+                sample_configs.append(
+                    SampleConfig(
+                        id=cfg.id, command=cfg.command, shell=cfg.shell,
+                        verification=v_resolved,
+                    )
+                )
             print(f"\n  从 CSV 读取 {len(sample_configs)} 个样本:")
             for cfg in sample_configs:
                 print(f"    [{cfg.shell.value}] {cfg.command}")
@@ -1046,6 +1088,85 @@ def format_cli_error(exc: Exception) -> str:
     if isinstance(exc, (VmToolsNotReadyError, RuntimeError)):
         return str(exc)
     return f"{type(exc).__name__}: operation failed"
+
+
+async def _resolve_env_vars_in_command(
+    provider: "VmwareProvider",
+    vm_id: str,
+    command: str,
+    credentials: "GuestCredentials",
+    active_user: str | None = None,
+) -> str:
+    """Detect %VAR% in command, expand, substitute active user path."""
+    var_names = _ENV_VAR_RE.findall(command)
+    if not var_names:
+        return command
+
+    # Expand each env var via echo (runs as auth user in guest)
+    expanded = command
+    for var_name in var_names:
+        try:
+            echo_result = await provider.run_guest_command(
+                vm_id,
+                f"echo %{var_name}%",
+                Shell.CMD,
+                credentials,
+                timeout_seconds=10,
+            )
+            value = echo_result.stdout.strip()
+            expanded = expanded.replace(f"%{var_name}%", value)
+        except Exception:
+            continue
+
+    if expanded == command:
+        return command
+
+    # Resolve active user if not cached
+    if active_user is None:
+        try:
+            qr = await provider.run_guest_command(
+                vm_id, "query user", Shell.CMD, credentials, timeout_seconds=10,
+            )
+            active_user = _parse_active_console_user(qr.stdout)
+        except Exception:
+            active_user = None
+
+    if not active_user:
+        return expanded
+
+    auth_user = credentials.user
+    if auth_user.lower() == active_user.lower():
+        return expanded
+
+    old_prefix = f"C:\\Users\\{auth_user}\\"
+    new_prefix = f"C:\\Users\\{active_user}\\"
+    if old_prefix not in expanded:
+        return expanded
+
+    return expanded.replace(old_prefix, new_prefix)
+
+
+async def _query_active_user(
+    provider: "VmwareProvider",
+    vm_id: str,
+    credentials: "GuestCredentials",
+) -> str | None:
+    try:
+        qr = await provider.run_guest_command(
+            vm_id, "query user", Shell.CMD, credentials, timeout_seconds=10,
+        )
+        return _parse_active_console_user(qr.stdout)
+    except Exception:
+        return None
+
+
+def _parse_active_console_user(query_output: str) -> str | None:
+    for line in query_output.splitlines():
+        if "Active" in line and "console" in line:
+            parts = line.split()
+            if parts:
+                return parts[0]
+    return None
 
 
 def main() -> None:

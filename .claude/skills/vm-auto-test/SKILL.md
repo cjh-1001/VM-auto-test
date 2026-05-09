@@ -1,39 +1,89 @@
 # VM Auto Test
 
-VMware Workstation 自动化验证框架：回滚快照 → 执行样本 → 采集结果 → 生成报告。
+Use this skill when the user wants to operate or reason about the local `vm-auto-test` project: VMware Workstation lab automation for authorized sample validation and AV blocking checks.
 
-**只做自动化执行和结果比对，不生成样本、不提供绕过能力、不尝试规避检测。**
+The project automates this workflow:
 
-## 前置条件（Agent 检查清单）
-
-在执行任何测试前，确认以下条件满足：
-
-1. `vmrun.exe` 可用，路径已配置在 `.env` 的 `VMRUN_PATH`
-2. 目标 VM 已安装 VMware Tools，未启用访问控制加密
-3. 目标 VM 中已创建本地管理员账户（非微软在线账户）
-4. `credentials.json` 中已配置该 VM 的 Guest 凭证
-5. VM 有可回滚的快照
-
-## CLI 命令参考
-
-```
-vm-auto-test                          # 交互菜单（无参数时）
-vm-auto-test --env-file .env <cmd>    # --env-file 仅顶层参数
+```text
+revert snapshot -> start VM -> wait for VMware Tools -> run verification before -> run sample -> run verification after -> collect logs -> write report
 ```
 
-| 命令 | 用途 | 关键参数 |
-|------|------|----------|
-| `vm-auto-test` | 交互菜单 | — |
-| `vm-auto-test vms` | 列出运行中 VM | — |
-| `vm-auto-test snapshots --vm <path>` | 列出 VM 快照 | `--vm` |
-| `vm-auto-test run` | 单样本测试 | `--vm`, `--mode`, `--snapshot`, `--sample-command`, `--verify-command` |
-| `vm-auto-test run-dir` | 扫描目录批量测试 | `--vm`, `--mode`, `--dir`, `--verify-command` |
-| `vm-auto-test run-csv` | CSV 批量测试 | `--vm`, `--mode`, `--csv`, `--samples-base-dir` |
-| `vm-auto-test init-config` | 交互生成 YAML 配置 | `--output`, `--mode`, `--vm` |
-| `vm-auto-test run-config <yaml>` | 执行 YAML 配置 | config 路径, `--guest-password` |
-| `vm-auto-test-smoke` | 真实 VMware 冒烟测试 | — |
+It only performs automation and result comparison. Do not use it to generate samples, bypass detection, evade AV/EDR, establish persistence, move laterally, or run tests outside an authorized local lab.
 
-### `run` 命令完整参数
+## Safety boundary
+
+Before helping the user run a test, confirm the work stays within these boundaries:
+
+- Authorized local VMware Workstation lab only.
+- Prefer isolated networking such as Host-only or NAT.
+- Always use a known rollback snapshot before executing a sample.
+- Do not run unknown samples on production hosts, shared systems, or non-owned VMs.
+- Do not print, summarize, or expose passwords from `credentials.json`.
+- Do not suggest AV bypass, stealth, obfuscation, anti-analysis, persistence, privilege escalation, or payload generation.
+- If the user asks for offensive capability beyond automation and comparison, refuse that part and redirect to safe validation/reporting workflows.
+
+## Preflight checklist
+
+Before running `vm-auto-test`, check or ask for:
+
+1. `vmrun.exe` is installed and `VMRUN_PATH` is configured in `.env`.
+2. The target VM is a `.vmx` path or a running VM returned by `vm-auto-test vms`.
+3. VMware Tools is installed and ready inside the guest.
+4. VM access control encryption is disabled; encrypted VMs often cause `vmrun` snapshot commands to hang or fail.
+5. A local guest administrator account exists. Microsoft online accounts usually do not work with `vmrun` guest auth.
+6. Guest credentials are configured through the interactive menu or available through the configured credential store.
+7. A clean snapshot exists for baseline mode, and an AV-installed snapshot exists for AV mode if needed.
+8. The sample path is the path inside the guest VM, not necessarily the host path.
+9. The verification command observes a real effect of the sample and is safe to run before and after execution.
+
+## Choosing the right command
+
+Use this decision guide:
+
+| User intent | Command |
+|---|---|
+| First-time setup or guided operation | `vm-auto-test` |
+| List running VMs | `vm-auto-test vms` |
+| List snapshots for a VM | `vm-auto-test snapshots --vm "<vmx path>"` |
+| Test one sample with known parameters | `vm-auto-test run ...` |
+| Test all matching files in a directory | `vm-auto-test run-dir ...` |
+| Test many samples from an Excel/CSV table | `vm-auto-test run-csv ...` |
+| Create a reusable YAML config | `vm-auto-test init-config ...` |
+| Run a reusable YAML config | `vm-auto-test run-config <yaml>` |
+| Check the real VMware path without running a sample suite | `vm-auto-test-smoke` |
+
+If the user provides only partial information, prefer the interactive menu (`vm-auto-test`) rather than guessing paths, credentials, snapshots, or verification commands.
+
+`--env-file` is a top-level argument:
+
+```bash
+vm-auto-test --env-file .env <command>
+```
+
+## Common workflows
+
+### 1. First run / interactive mode
+
+Use this when the user wants guidance or has not configured the environment yet:
+
+```bash
+vm-auto-test
+```
+
+The menu can configure `VMRUN_PATH`, list VMs, list snapshots, configure guest credentials, and run single-sample or CSV tests.
+
+### 2. Discover VM and snapshots
+
+```bash
+vm-auto-test vms
+vm-auto-test snapshots --vm "E:\VM-MCP\windows11\Windows 11 x64.vmx"
+```
+
+If snapshot listing times out or fails, first suspect VM encryption/access control or an invalid `.vmx` path.
+
+### 3. Single-sample baseline test
+
+Use baseline mode on a clean snapshot to prove the sample produces the expected observable effect:
 
 ```bash
 vm-auto-test run \
@@ -44,14 +94,33 @@ vm-auto-test run \
   --sample-shell cmd \
   --verify-command "hostname" \
   --verify-shell powershell \
-  --guest-user testuser \
-  --guest-password admin123 \
   --reports-dir reports
 ```
 
-AV 模式额外需要 `--baseline-result` 指向通过的 baseline `result.json`。
+Prefer a verification command that observes the sample's actual expected effect. `hostname` is useful as a harmless smoke example, but often not enough to prove a real behavior change.
 
-### `run-dir` 命令
+### 4. Single-sample AV test
+
+Run AV mode only after a baseline report classified as `BASELINE_VALID`:
+
+```bash
+vm-auto-test run \
+  --vm "E:\VM-MCP\windows11\Windows 11 x64.vmx" \
+  --mode av \
+  --snapshot "av-installed" \
+  --sample-command "C:\Samples\sample.exe" \
+  --sample-shell cmd \
+  --verify-command "hostname" \
+  --verify-shell powershell \
+  --baseline-result "reports/20260509-120000-000000-sample/result.json" \
+  --reports-dir reports
+```
+
+AV mode validates whether the effect still occurs in the AV snapshot. It does not attempt to bypass or tune around detection.
+
+### 5. Directory batch test
+
+Use when all samples in a guest-visible directory share one verification command:
 
 ```bash
 vm-auto-test run-dir \
@@ -61,29 +130,56 @@ vm-auto-test run-dir \
   --dir "C:\Samples" \
   --pattern "*.exe" \
   --verify-command "hostname" \
-  --verify-shell powershell
+  --verify-shell powershell \
+  --reports-dir reports
 ```
 
-### `run-csv` 命令
+Default patterns include `*.exe`, `*.bat`, `*.ps1`, and `*.cmd` when `--pattern` is omitted.
+
+### 6. CSV batch test
+
+Use when each sample has its own verification command:
 
 ```bash
 vm-auto-test run-csv \
   --vm "E:\VM-MCP\windows11\Windows 11 x64.vmx" \
   --mode baseline \
+  --snapshot "clean-snapshot" \
   --csv samples.csv \
-  --samples-base-dir "C:\Samples"
+  --samples-base-dir "C:\Samples" \
+  --reports-dir reports
 ```
 
-CSV 格式 (UTF-8, 3列, 无表头或首列为 `sample_file` 时跳过):
+CSV format is UTF-8 or GBK with 3 columns. A header row is optional when the first column starts with `sample`.
 
 | sample_file | verify_command | verify_shell |
-|-------------|----------------|-------------|
+|---|---|---|
 | `sample.exe` | `hostname` | `cmd` |
 | `test.bat` | `schtasks /query` | `powershell` |
 
-## YAML 配置模板
+Relative `sample_file` values require `--samples-base-dir`.
 
-### 单样本 baseline
+### 7. YAML config workflow
+
+Use YAML configs for repeatable test runs:
+
+```bash
+vm-auto-test init-config --output configs/baseline.yaml --mode baseline
+vm-auto-test run-config configs/baseline.yaml
+```
+
+For AV configs, include a valid baseline result path:
+
+```yaml
+mode: av
+baseline_result: "reports/20260509-120000-000000-sample/result.json"
+```
+
+Prefer `guest.password_env` over storing passwords directly in YAML.
+
+## YAML essentials
+
+Single-sample baseline shape:
 
 ```yaml
 vm_id: "E:\\VM-MCP\\windows11\\Windows 11 x64.vmx"
@@ -99,179 +195,95 @@ verification:
   command: "hostname"
   shell: powershell
 reports_dir: reports
-timeouts:
-  wait_guest_seconds: 180
-  command_seconds: 120
 provider:
   type: vmrun
 ```
 
-### 多样本 baseline
+Multi-sample configs use `samples:` instead of `sample:`. Do not include both.
 
-```yaml
-vm_id: "E:\\VM-MCP\\windows11\\Windows 11 x64.vmx"
-snapshot: "clean-snapshot"
-mode: baseline
-guest:
-  user: testuser
-  password_env: VMWARE_GUEST_PASSWORD
-samples:
-  - id: sample1
-    command: "C:\\Samples\\sample1.exe"
-    shell: cmd
-  - id: sample2
-    command: "C:\\Samples\\sample2.exe"
-    shell: cmd
-verification:
-  command: "hostname"
-  shell: powershell
-reports_dir: reports
+## Result interpretation
+
+| Classification | Meaning | Next step |
+|---|---|---|
+| `BASELINE_VALID` | The verification output changed in baseline mode. | The sample/effect is valid enough to compare against AV mode. |
+| `BASELINE_INVALID` | The verification output did not change in baseline mode. | Check sample path, guest permissions, timeout, and whether the verification command observes the right effect. |
+| `AV_NOT_BLOCKED` | In AV mode, the effect still occurred. | Keep the report for defensive analysis; do not pivot into evasion guidance. |
+| `AV_BLOCKED_OR_NO_CHANGE` | In AV mode, no effect was observed. | Check report files and configured AV logs to distinguish blocking from sample failure. |
+
+Reports are written under `reports/` unless overridden:
+
+```text
+reports/<timestamp>-<sample>/
+  result.json
+  before.txt
+  after.txt
+  sample_stdout.txt
+  sample_stderr.txt
 ```
 
-### AV 模式（需 baseline_result）
+Batch reports include per-sample result directories under the batch report directory.
+
+## Comparison strategies
+
+Default behavior is `changed`: compare normalized before/after output.
+
+YAML `verification.comparisons` can use:
+
+| Type | Use |
+|---|---|
+| `changed` | Before/after output differs after normalization. |
+| `contains` | Output contains `value`. |
+| `regex` | Output matches `pattern`. |
+| `json_field` | JSON field at `path` equals `expected`. |
+| `file_hash` | Output hash equals `expected`. |
+
+Example:
 
 ```yaml
-vm_id: "E:\\VM-MCP\\windows11\\Windows 11 x64.vmx"
-snapshot: "av-snapshot"
-mode: av
-baseline_result: "reports/20260509-120000-000000-sample/result.json"
-guest:
-  user: testuser
-  password_env: VMWARE_GUEST_PASSWORD
-samples:
-  - id: sample1
-    command: "C:\\Samples\\sample1.exe"
-    shell: cmd
 verification:
-  command: "hostname"
-  shell: powershell
+  command: "type C:\\marker.txt"
+  shell: cmd
+  comparisons:
+    - type: contains
+      target: after
+      value: "created"
+```
+
+## AV log collection
+
+The tool only runs explicitly configured log collection commands:
+
+```yaml
 av_logs:
   collectors:
     - id: app-events
       type: guest_command
       command: "Get-WinEvent -LogName Application -MaxEvents 20"
       shell: powershell
-reports_dir: reports
 ```
 
-## 工作流程
+Do not invent vendor-specific collectors unless the user provides the exact safe command they want to run.
 
-### 快速单样本测试（推荐首选用法）
+## Troubleshooting
+
+| Symptom | Likely cause | Safe action |
+|---|---|---|
+| Snapshot listing fails or times out | VM access control encryption or wrong `.vmx` path | Ask user to disable encryption and verify the VM path. |
+| `VmToolsNotReadyError` | VMware Tools missing, stopped, or guest not booted | Ask user to install/restart VMware Tools and retry. |
+| Guest authentication fails repeatedly | Wrong local credentials or Microsoft online account | Use a local administrator account and reconfigure credentials through the menu. |
+| AV mode says missing baseline | `--baseline-result` absent or not `BASELINE_VALID` | Run baseline first and pass its `result.json`. |
+| CSV parse error | Encoding or column mismatch | Save as CSV UTF-8/GBK with 3 columns. |
+| `BASELINE_INVALID` | Verification command does not observe the effect | Choose a better verification command; do not change the sample to evade tools. |
+
+## Development checks
+
+When modifying Python project code, run:
 
 ```bash
-# 1. 确保 env 和 credentials 就绪
-vm-auto-test vms                                    # 列出 VM
-vm-auto-test snapshots --vm "E:\VM-MCP\...vmx"      # 列快照
-
-# 2. Baseline 测试
-vm-auto-test run \
-  --vm "E:\VM-MCP\windows11\Windows 11 x64.vmx" \
-  --mode baseline \
-  --snapshot "clean" \
-  --sample-command "C:\Samples\sample.exe" \
-  --verify-command "hostname" \
-  --verify-shell powershell
-
-# 3. 如果 baseline 通过（BASELINE_VALID），继续 AV 测试
-vm-auto-test run \
-  --vm "E:\VM-MCP\windows11\Windows 11 x64.vmx" \
-  --mode av \
-  --snapshot "av-installed" \
-  --sample-command "C:\Samples\sample.exe" \
-  --verify-command "hostname" \
-  --verify-shell powershell \
-  --baseline-result "reports/20260509-XXXXXX-sample/result.json"
+pytest
+python -m compileall -q src tests
 ```
 
-### YAML 配置工作流（适合重复执行）
+The test suite uses fake providers and does not require a real VMware environment. `vm-auto-test-smoke` is the real VMware smoke test and should only be run when the user explicitly wants to touch the local VMware setup.
 
-```bash
-# 1. 交互生成配置
-vm-auto-test init-config --output configs/baseline.yaml --mode baseline
-
-# 2. 执行
-vm-auto-test run-config configs/baseline.yaml
-
-# 3. AV 模式
-vm-auto-test init-config --output configs/av.yaml --mode av
-vm-auto-test run-config configs/av.yaml
-```
-
-## 结果判定
-
-| 分类 | 含义 |
-|------|------|
-| `BASELINE_VALID` | 样本有效：执行前后验证命令输出发生变化 |
-| `BASELINE_INVALID` | 样本无效：执行前后验证命令输出无变化 |
-| `AV_NOT_BLOCKED` | 杀软未拦截：AV 环境下攻击效果仍发生 |
-| `AV_BLOCKED_OR_NO_CHANGE` | 杀软已拦截或未生效 |
-
-## 输出比较策略
-
-默认 `changed`（前后归一化后不同即为有效）。在 YAML 配置中可通过 `comparisons` 使用其他策略：
-
-| 策略 | 用途 | YAML 示例 |
-|------|------|-----------|
-| `changed` | 归一化后前后不同 | 默认 |
-| `contains` | 输出包含指定字符串 | `{type: contains, value: "created"}` |
-| `regex` | 输出匹配正则 | `{type: regex, pattern: "Error: \\d+"}` |
-| `json_field` | JSON 字段等于预期值 | `{type: json_field, path: "result.status", expected: "ok"}` |
-| `file_hash` | 输出 SHA-256 等于预期 | `{type: file_hash, expected: "abc123..."}` |
-
-## 环境配置
-
-### .env 文件
-
-```bash
-VMRUN_PATH="C:\Program Files (x86)\VMware\VMware Workstation\vmrun.exe"
-VMWARE_CREDENTIALS_FILE=credentials.json
-VMWARE_HOST=localhost
-VMWARE_PORT=8697
-```
-
-### credentials.json
-
-Key 为 .vmx 绝对路径：
-
-```json
-{
-  "E:\\VM-MCP\\windows11\\Windows 11 x64.vmx": {
-    "user": "testuser",
-    "password": "admin123"
-  }
-}
-```
-
-通过交互菜单 [3] 可管理凭证（添加、验证、重新配置）。Agent 也可直接读写此 JSON 文件。
-
-## 报告结构
-
-```
-reports/
-└── 20260509-023223-336747-1-A_schtasks/
-    ├── result.json          # 汇总结果
-    ├── before.txt           # 执行前验证输出
-    ├── after.txt            # 执行后验证输出
-    ├── sample_stdout.txt    # 样本 stdout
-    └── sample_stderr.txt    # 样本 stderr
-```
-
-## 故障排查
-
-| 问题 | 原因 | 解决 |
-|------|------|------|
-| 无法列出快照 / 超时 5s | VM 启用了访问控制加密 | VMware Workstation → 设置 → 选项 → 访问控制 → 移除加密 |
-| `VmToolsNotReadyError` | VMware Tools 未安装或未就绪 | 确认 VM 中已安装 VMware Tools 并重启 |
-| Guest 认证连续 5 次失败 | 用户名密码错误或用微软在线账户 | 使用本地管理员账户 |
-| `vmrun` 命令不可用 | VMRUN_PATH 未配置 | 运行 `vm-auto-test` 进入交互菜单 [5] 配置 |
-| AV 模式报错缺 baseline | `--baseline-result` 未指定或路径无效 | 先完成 baseline 测试，填入有效 result.json 路径 |
-| CSV 编码报错 | CSV 不是 UTF-8 | 用 Excel 另存为 CSV UTF-8 |
-
-## 安全边界
-
-- 仅用于有授权的本地 VM 实验环境
-- 使用隔离网络（Host-only/NAT）
-- 每次测试前回滚到明确快照
-- 不要在共享或生产环境中运行
-- `.env` 和 `credentials.json` 不要提交到 git
-- 密码不写入 YAML 配置；用 `password_env` 或交互式输入
+When modifying only this skill document, Python tests are usually unnecessary; review that commands match `src/vm_auto_test/cli.py`, the safety boundary is intact, and no credentials or sensitive paths are exposed.
