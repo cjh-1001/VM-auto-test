@@ -259,7 +259,7 @@ def test_scan_samples_from_directory_sanitizes_sample_ids(tmp_path):
     assert samples[0].id == "sample (copy)"
 
 
-_CSV_HEADER = "sample_file,shell,verify_command,verify_shell"
+_CSV_HEADER = "sample_file,verify_command,verify_shell"
 
 
 def _write_csv(path: Path, lines: list[str]) -> Path:
@@ -272,8 +272,8 @@ def test_parse_csv_samples_basic(tmp_path):
     csv_path = _write_csv(
         tmp_path / "samples.csv",
         [
-            "one.exe,cmd,hostname,cmd",
-            "two.ps1,powershell,Get-Content C:\\marker.txt,powershell",
+            "one.exe,hostname,cmd",
+            "two.ps1,Get-Content C:\\marker.txt,powershell",
         ],
     )
 
@@ -288,7 +288,7 @@ def test_parse_csv_samples_basic(tmp_path):
 
     assert samples[1].id == "two"
     assert samples[1].command == "C:\\Samples\\two.ps1"
-    assert samples[1].shell == Shell.POWERSHELL
+    assert samples[1].shell == Shell.CMD
     assert samples[1].verification.command == "Get-Content C:\\marker.txt"
     assert samples[1].verification.shell == Shell.POWERSHELL
 
@@ -296,7 +296,7 @@ def test_parse_csv_samples_basic(tmp_path):
 def test_parse_csv_samples_absolute_path_unchanged(tmp_path):
     csv_path = _write_csv(
         tmp_path / "samples.csv",
-        ["C:\\abs\\payload.exe,cmd,verify,cmd"],
+        ["C:\\abs\\payload.exe,verify,cmd"],
     )
 
     samples = parse_csv_samples(csv_path)
@@ -307,7 +307,7 @@ def test_parse_csv_samples_absolute_path_unchanged(tmp_path):
 def test_parse_csv_samples_quoted_field_with_comma(tmp_path):
     csv_path = _write_csv(
         tmp_path / "samples.csv",
-        ['sample.exe,cmd,"Compare-Object (Get-ItemProperty HKLM:\\.. -Name F).F, something",powershell'],
+        ['sample.exe,"Compare-Object (Get-ItemProperty HKLM:\\.. -Name F).F, something",powershell'],
     )
 
     samples = parse_csv_samples(csv_path, samples_base_dir="C:\\Samples")
@@ -317,21 +317,21 @@ def test_parse_csv_samples_quoted_field_with_comma(tmp_path):
 
 
 def test_parse_csv_samples_raises_missing_columns(tmp_path):
-    csv_path = _write_csv(tmp_path / "samples.csv", ["only.exe,cmd,missing_fourth"])
+    csv_path = _write_csv(tmp_path / "samples.csv", ["only.exe,missing_third"])
 
-    with pytest.raises(ValueError, match="expected 4 columns"):
+    with pytest.raises(ValueError, match="expected 3 columns"):
         parse_csv_samples(csv_path, samples_base_dir="C:\\Samples")
 
 
 def test_parse_csv_samples_raises_invalid_shell(tmp_path):
-    csv_path = _write_csv(tmp_path / "samples.csv", ["bad.exe,bash,verify,cmd"])
+    csv_path = _write_csv(tmp_path / "samples.csv", ["bad.exe,verify,bash"])
 
     with pytest.raises(ValueError, match="shell must be"):
         parse_csv_samples(csv_path, samples_base_dir="C:\\Samples")
 
 
 def test_parse_csv_samples_raises_relative_path_without_base_dir(tmp_path):
-    csv_path = _write_csv(tmp_path / "samples.csv", ["sample.exe,cmd,verify,cmd"])
+    csv_path = _write_csv(tmp_path / "samples.csv", ["sample.exe,verify,cmd"])
 
     with pytest.raises(ValueError, match="base-dir"):
         parse_csv_samples(csv_path)

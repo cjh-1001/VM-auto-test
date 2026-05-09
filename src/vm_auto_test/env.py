@@ -47,18 +47,17 @@ def resolve_guest_credentials(vm_id: str) -> GuestCredentials | None:
     """Resolve guest credentials for a VM.
 
     Lookup order:
-    1. VMWARE_CREDENTIALS_FILE JSON, keyed by VM stem (filename without .vmx and path)
+    1. VMWARE_CREDENTIALS_FILE JSON, keyed by vm_id (absolute .vmx path)
     2. VMWARE_GUEST_USER / VMWARE_GUEST_PASSWORD env vars
     3. Return None (caller should prompt)
     """
-    vm_stem = Path(vm_id).stem
     creds_file = os.getenv("VMWARE_CREDENTIALS_FILE", "")
     if creds_file:
         creds_path = Path(creds_file)
         if creds_path.is_file():
             try:
                 data = json.loads(creds_path.read_text(encoding="utf-8"))
-                entry = data.get(vm_stem) or data.get(vm_id)
+                entry = data.get(vm_id)
                 if isinstance(entry, dict) and entry.get("user"):
                     return GuestCredentials(
                         user=entry["user"],
@@ -103,16 +102,14 @@ def save_credentials_store(data: dict[str, dict[str, str]]) -> None:
 
 def upsert_vm_credentials(vm_id: str, user: str, password: str) -> None:
     store = load_credentials_store()
-    stem = Path(vm_id).stem
-    store[stem] = {"user": user, "password": password}
+    store[vm_id] = {"user": user, "password": password}
     save_credentials_store(store)
 
 
 def remove_vm_credentials(vm_id: str) -> bool:
     store = load_credentials_store()
-    stem = Path(vm_id).stem
-    if stem in store:
-        del store[stem]
+    if vm_id in store:
+        del store[vm_id]
         save_credentials_store(store)
         return True
     return False

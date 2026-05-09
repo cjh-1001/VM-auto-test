@@ -514,17 +514,14 @@ def parse_csv_samples(
 
     samples: list[SampleConfig] = []
     for row_index, row in enumerate(rows, start=2):
-        if len(row) < 4:
-            raise ValueError(f"Row {row_index}: expected 4 columns (sample_file, shell, verify_command, verify_shell), got {len(row)}")
+        if len(row) < 3:
+            raise ValueError(f"Row {row_index}: expected 3 columns (sample_file, verify_command, verify_shell), got {len(row)}")
         sample_file = row[0].strip()
-        shell_str = row[1].strip().lower()
-        verify_command = row[2].strip()
-        verify_shell_str = row[3].strip().lower()
+        verify_command = row[1].strip()
+        verify_shell_str = row[2].strip().lower()
 
         if not sample_file:
             raise ValueError(f"Row {row_index}: sample_file is empty")
-        if shell_str not in {"cmd", "powershell"}:
-            raise ValueError(f"Row {row_index}: shell must be 'cmd' or 'powershell', got '{shell_str}'")
         if not verify_command:
             raise ValueError(f"Row {row_index}: verify_command is empty")
         if verify_shell_str not in {"cmd", "powershell"}:
@@ -544,7 +541,7 @@ def parse_csv_samples(
             SampleConfig(
                 id=sample_id,
                 command=command,
-                shell=Shell(shell_str),
+                shell=Shell.CMD,
                 verification=VerificationConfig(
                     command=verify_command,
                     shell=Shell(verify_shell_str),

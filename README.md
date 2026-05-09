@@ -4,48 +4,85 @@
 
 **只做自动化执行和结果比对，不生成样本、不提供绕过能力、不尝试规避检测。**
 
-## 环境要求
+---
 
-- Windows 宿主机 + VMware Workstation Pro 17+
-- Python 3.10+
-- Guest 已安装 VMware Tools
-- `vmrun.exe` 可用（默认路径 `C:\Program Files (x86)\VMware\VMware Workstation\vmrun.exe`）
-- **VM 不能开启访问控制加密**（否则 vmrun 无法列出快照，会超时报错）
+## 前置准备
 
-如果遇到"无法列出快照"或查询超时，检查 VM 是否启用了加密：
-VMware Workstation → 虚拟机设置 → 选项 → 访问控制 → 移除加密。
+使用本框架前，每台用于测试的 VM 必须完成以下配置。**以下步骤在 VM 内部操作。**
+
+### 1. 关闭访问控制加密
+
+vmrun 无法操作已加密的 VM（无法列出快照、无法执行 Guest 命令）。创建 VM 时不要勾选"加密"，如果已经加密：
+
+1. 先移除**硬件可信平台模块**（TPM）：虚拟机设置 → 选项 → 高级 → 固件类型，临时改为 BIOS 再改回 UEFI 可触发移除 TPM 的选项
+2. VMware Workstation → 虚拟机设置 → 选项 → 访问控制 → **移除加密**
+3. 创建 VM 时切勿使用随机生成的加密密码，否则事后无法解除
+
+> 如果遇到"无法列出快照"或 vmrun 命令超时，首先检查 VM 是否启用了访问控制加密。
+
+### 2. 安装 VMware Tools
+
+必须安装，否则 vmrun 无法在 Guest 内执行程序、无法检查系统状态。
+
+- VM 菜单 → 虚拟机 → 安装 VMware Tools
+- 按向导完成安装后**重启 VM**
+
+### 3. 创建本地管理员账户
+
+**不要使用绑定微软账户的在线账户**——vmrun 的 Guest 认证不支持微软在线账户，必须使用本地账户。
+
+在 VM 中以管理员身份打开 CMD 或 PowerShell：
+
+```cmd
+net user testuser admin123 /add
+net localgroup Administrators testuser /add
+net user testuser /active:yes
+```
+
+记住用户名和密码，后续在框架中配置凭证时需要用到。
+
+### 4. 最小测试三要素
+
+每次单样本测试需要提供三样东西：
+
+| 要素 | 说明 | 示例 |
+|---|---|---|
+| 样本 | 待执行的 PE 文件 | `1.exe` |
+| 样本路径 | Guest 中样本存放的路径 | `C:\Samples\1.exe` |
+| 验证命令 | 执行样本前后各跑一次，用于判断样本是否生效 | `hostname` 或 `schtasks /query` |
+
+框架行为：**执行前跑一次验证命令 → 执行样本 → 执行后再跑一次验证命令 → 比对前后输出**。验证命令的输出变化是判定样本是否有效的依据。
+
+---
 
 ## 安装
+
+**环境要求：** Windows 宿主机 + VMware Workstation Pro 17+，Python 3.10+，`vmrun.exe` 可用。
 
 ```bash
 pip install -e .
 ```
 
-开发依赖（跑测试用）：
+开发依赖：
 
 ```bash
 pip install -e .[dev]
 ```
 
+---
+
 ## 快速开始
-
-```bash
-copy .env.example .env
-```
-
-编辑 `.env`，填入你的 vmrun 路径：
-
-```bash
-VMRUN_PATH=D:\VM2\vmrun.exe
-```
-
-然后启动：
 
 ```bash
 vm-auto-test
 ```
 
-VMRUN_PATH 配置正确则直接进主菜单，否则自动进入环境配置引导。主菜单选 [5] 可随时修改。
+首次运行 VMRUN_PATH 未配置时自动进入环境配置引导，按提示填入 vmrun.exe 路径即可。也可以手动配置：
+
+```bash
+copy .env.example .env
+# 编辑 .env 填入 VMRUN_PATH=D:\VM2\vmrun.exe
+```
 
 ```
   —— VM Auto Test ——
@@ -57,62 +94,52 @@ VMRUN_PATH 配置正确则直接进主菜单，否则自动进入环境配置引
   [5] 重新配置环境
 ```
 
-全程逐步引导。样本默认 cmd 执行，验证命令默认 powershell。
+全程逐步引导。样本默认 cmd 执行。
 
 ### 配置 Guest 凭证
 
-不再在 `.env` 中配置全局用户名密码。每个 VM 的凭证独立管理：
+每个 VM 的凭证独立管理，不放在 `.env` 中：
 
 1. 主菜单选 **[3] 列出 VM**
 2. 选择要配置的 VM
 3. 选 `[1] 配置凭证`，输入该 VM 的 Guest 用户名密码
 4. 保存后自动验证，成功即完成
 
-凭证保存在 `credentials.json`（按 VM 文件名匹配）：
-
-```json
-{
-  "Windows 11 x64": {
-    "user": "19657",
-    "password": "admin123"
-  }
-}
-```
-
 已配置的 VM 在列表中会标注 `[已配置]`。也可以 `[1] 验证凭证` 测试现有配置是否有效，或 `[2] 重新配置` 修改。
 
-### CSV 表格格式（多样本测试）
+---
 
-Excel 编辑，4 列，保存为 **CSV UTF-8**：
+## 测试流程
 
-| 列 | 含义 | 示例 |
-|---|---|---|
-| `sample_file` | 样本文件名 | `1.exe` |
-| `shell` | 执行用 `cmd` 还是 `powershell` | `cmd` |
-| `verify_command` | 验证命令（样本前后各跑一次） | `hostname` |
-| `verify_shell` | 验证命令的 shell | `cmd` |
+每次单样本测试按以下步骤执行：
 
-文件名即可，交互菜单会引导输入样本目录，框架自动拼接完整路径。写绝对路径也可以，目录留空就只用文件名。
-
-### 结果怎么看
-
-| 输出 | 含义 |
+| 步骤 | 说明 |
 |---|---|
-| 有效 / `BASELINE_VALID` | 样本跑完后验证输出变了，样本有效 |
-| 无效 / `BASELINE_INVALID` | 验证输出无变化，样本无效 |
-| 未拦截 / `AV_NOT_BLOCKED` | 杀软没拦住，攻击效果发生 |
-| 已拦截 / `AV_BLOCKED_OR_NO_CHANGE` | 杀软拦截或未生效 |
-
-报告在 `reports/时间戳-样本名/` 下，每个样本一个子目录。
+| `revert snapshot` | 回滚到指定快照 |
+| `start vm` | 启动 VM |
+| `wait guest ready` | 等待 VMware Tools 就绪 + 验证 Guest 凭证（连续 5 次失败自动终止） |
+| `before verification` | 执行验证命令，获取 baseline |
+| `run sample` | 在 Guest 中执行测试样本 |
+| `after verification` | 再次执行验证命令，获取结果 |
+| `evaluate` | 比对前后输出，判定有效/无效 |
 
 ## 两种测试模式
 
 | 模式 | 快照环境 | 作用 |
 |---|---|---|
-| `baseline` | 干净系统（无杀软） | 先确认样本本身有效（打了有反应） |
+| `baseline` | 干净系统（无杀软） | 先确认样本本身有效 |
 | `av` | 装了杀软的系统 | 再看杀软能不能拦截 |
 
 AV 模式必须先有一份已通过的 baseline 报告。
+
+## 结果判定
+
+| 判定结果 | 含义 |
+|---|---|
+| 有效 / `BASELINE_VALID` | 样本跑完后验证输出变了，样本有效 |
+| 无效 / `BASELINE_INVALID` | 验证输出无变化，样本无效 |
+| 未拦截 / `AV_NOT_BLOCKED` | 杀软没拦住，攻击效果发生 |
+| 已拦截 / `AV_BLOCKED_OR_NO_CHANGE` | 杀软拦截或未生效 |
 
 ## 报告目录
 
@@ -126,42 +153,25 @@ reports/
     └── sample_stderr.txt    # 样本 stderr
 ```
 
-## 命令行参考
+## CSV 批量测试
 
-如果不想用交互菜单，也可以直接传参：
+Excel 编辑，3 列，保存为 **CSV UTF-8**：
 
-| 命令 | 用途 |
-|---|---|
-| `vm-auto-test` | 交互菜单 |
-| `vm-auto-test run --vm ... --sample ... --verify ...` | 单样本测试 |
-| `vm-auto-test run-csv --csv ...` | CSV 批量测试 |
-| `vm-auto-test run-dir --dir ...` | 扫描目录批量测试 |
-| `vm-auto-test vms` | 列出运行中的 VM |
-| `vm-auto-test snapshots --vm ...` | 列出快照 |
+| 列 | 含义 | 示例 |
+|---|---|---|
+| `sample_file` | 样本文件名 | `1.exe` |
+| `verify_command` | 验证命令 | `hostname` |
+| `verify_shell` | 验证命令的 shell | `cmd` |
 
-## 测试流程
-
-每次单样本测试按以下步骤执行：
-
-| 步骤 | 说明 |
-|------|------|
-| `create report dir` | 创建报告目录 |
-| `revert snapshot` | 回滚到指定快照 |
-| `start vm` | 启动 VM |
-| `wait guest ready` | 等待 VMware Tools 就绪 + 验证 Guest 凭证（5 次失败自动终止） |
-| `before verification` | 执行验证命令，获取 baseline |
-| `run sample` | 在 Guest 中执行测试样本 |
-| `after verification` | 再次执行验证命令，获取结果 |
-| `evaluate` | 比对前后输出，判定有效/无效 |
-| `write report` | 生成报告文件 |
+文件名即可，交互菜单会引导输入样本目录，框架自动拼接完整路径。写绝对路径也可以。
 
 ## 输出比较策略
 
-不配置时默认用 `changed`（前后归一化后不同即为有效）。可以按需配置更精确的策略：
+不配置时默认用 `changed`（前后归一化后不同即为有效）：
 
 | 策略 | 作用 | 配置示例 |
 |---|---|---|
-| `changed` | 归一化后前后不同 | 默认，无需配置 |
+| `changed` | 归一化后前后不同 | 默认 |
 | `contains` | 输出包含指定字符串 | `value: "created"` |
 | `regex` | 输出匹配正则 | `pattern: "Error: \\d+"` |
 | `json_field` | JSON 字段等于预期值 | `path: "result.status"`, `expected: "ok"` |
@@ -180,47 +190,56 @@ av_logs:
       shell: powershell
 ```
 
+---
+
+## 命令行参考
+
+| 命令 | 用途 |
+|---|---|
+| `vm-auto-test` | 交互菜单 |
+| `vm-auto-test run --vm ... --sample ... --verify ...` | 单样本测试 |
+| `vm-auto-test run-csv --csv ...` | CSV 批量测试 |
+| `vm-auto-test run-dir --dir ...` | 扫描目录批量测试 |
+| `vm-auto-test vms` | 列出运行中的 VM |
+| `vm-auto-test snapshots --vm ...` | 列出快照 |
+
+---
+
 ## 配置文件
 
-### .env — 全局环境变量
+### .env
 
 ```bash
-# vmrun.exe 路径
 VMRUN_PATH=D:\VM2\vmrun.exe
-
-# VM 凭证文件路径（可选，默认 credentials.json）
-VMWARE_CREDENTIALS_FILE=credentials.json
-
-# vmrest/MCP 配置（可选）
-VMWARE_HOST=localhost
-VMWARE_PORT=8697
+VMWARE_CREDENTIALS_FILE=credentials.json   # 可选，默认 credentials.json
+VMWARE_HOST=localhost                       # vmrest，可选
+VMWARE_PORT=8697                            # vmrest，可选
 ```
 
-### credentials.json — 按 VM 配置凭证
+### credentials.json
+
+Key 为 `.vmx` 文件的绝对路径，避免同名 VM 冲突：
 
 ```json
 {
-  "Windows 11 x64": {
-    "user": "19657",
+  "E:\\VM-MCP\\windows11\\Windows 11 x64.vmx": {
+    "user": "testuser",
     "password": "admin123"
   },
-  "Win10": {
+  "D:\\VM2\\Win10\\Win10.vmx": {
     "user": "admin",
     "password": "pass456"
   }
 }
 ```
 
-Key 为 `.vmx` 文件名去掉路径和扩展名。可通过主菜单 [3] 交互式添加、验证、重新配置。
+通过主菜单 [3] 交互式添加、验证、重新配置。
 
-## Provider
+---
 
-| provider | 状态 |
-|---|---|
-| `vmrun` | 已实现，默认 |
-| `vsphere` / `powercli` / `mcp` | 占位，待后续实现 |
+## 开发
 
-## 测试
+### 测试
 
 ```bash
 pytest
@@ -229,16 +248,20 @@ python -m compileall -q src tests
 
 当前 88 个测试，使用 fake provider，不需要真实 VMware 环境。
 
-### 真实 VMware smoke test
+真实 VMware smoke test（无害链路检查：列快照、启动、等 Tools、跑 `hostname`）：
 
 ```bash
-# .env 里配置 VMRUN_PATH 和 credentials.json 即可
 vm-auto-test-smoke
 ```
 
-只做无害链路检查：列快照、可选回滚、启动、等 VMware Tools、跑 `hostname`。
+### Provider
 
-## 项目结构
+| provider | 状态 |
+|---|---|
+| `vmrun` | 已实现，默认 |
+| `vsphere` / `powercli` / `mcp` | 占位，待后续实现 |
+
+### 项目结构
 
 ```text
 src/
@@ -261,10 +284,12 @@ src/
 tests/                       # fake provider 离线测试
 ```
 
+---
+
 ## 安全边界
 
 - 仅用于你拥有授权的本地虚拟机实验环境
 - 使用隔离网络或 Host-only/NAT
 - 每次测试前回滚到明确快照
 - 不在生产主机或共享环境中运行未知样本
-- Guest 密码写入 `credentials.json`，`.env` 和 `credentials.json` 都不要提交到 git
+- `.env` 和 `credentials.json` 不要提交到 git

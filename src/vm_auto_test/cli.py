@@ -96,7 +96,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_csv_parser.add_argument("--vm", required=True, help="VM ID or .vmx path")
     run_csv_parser.add_argument("--mode", choices=[mode.value for mode in TestMode], required=True)
     run_csv_parser.add_argument("--snapshot", help="Snapshot name. If omitted, choose interactively.")
-    run_csv_parser.add_argument("--csv", required=True, help="Path to CSV file (UTF-8 BOM, columns: sample_file,shell,verify_command,verify_shell)")
+    run_csv_parser.add_argument("--csv", required=True, help="Path to CSV file (UTF-8 BOM, columns: sample_file,verify_command,verify_shell)")
     run_csv_parser.add_argument("--samples-base-dir", help="Base directory on VM for relative sample paths")
     run_csv_parser.add_argument("--guest-user")
     run_csv_parser.add_argument("--guest-password")
@@ -389,8 +389,7 @@ async def _interactive_list_vms(provider: VmwareProvider) -> None:
         return
     for i, vm in enumerate(vms, 1):
         store = load_credentials_store()
-        stem = Path(vm).stem
-        tag = "  [已配置]" if stem in store else ""
+        tag = "  [已配置]" if vm in store else ""
         print(f"  [{i}] {vm}{tag}")
 
     print("\n  —— 选择 VM ——")
@@ -398,14 +397,13 @@ async def _interactive_list_vms(provider: VmwareProvider) -> None:
     if result is None or result is _BACK:
         return
     vm_id = result
-    stem = Path(vm_id).stem
 
     while True:
         store = load_credentials_store()
-        if stem in store:
-            entry = store[stem]
+        if vm_id in store:
+            entry = store[vm_id]
             credentials = GuestCredentials(entry["user"], entry["password"])
-            print(f"\n  VM: {stem}")
+            print(f"\n  VM: {vm_id}")
             print(f"  已配置凭证: {credentials.user}")
             print("  [0] 返回")
             print("  [1] 验证凭证")
@@ -422,7 +420,7 @@ async def _interactive_list_vms(provider: VmwareProvider) -> None:
             else:
                 continue
         else:
-            print(f"\n  VM: {stem}")
+            print(f"\n  VM: {vm_id}")
             print("  该 VM 未配置凭证")
             print("  [0] 返回")
             print("  [1] 配置凭证")
@@ -436,11 +434,11 @@ async def _interactive_list_vms(provider: VmwareProvider) -> None:
             else:
                 continue
 
-        print(f"\n  正在验证 {credentials.user}@{stem} ...")
+        print(f"\n  正在验证 {credentials.user}@{vm_id} ...")
         try:
             await provider.verify_guest_credentials(vm_id, credentials)
             print("  凭证验证成功 ✓")
-            if stem not in load_credentials_store():
+            if vm_id not in load_credentials_store():
                 upsert_vm_credentials(vm_id, credentials.user, credentials.password)
                 print(f"  已保存到 {os.getenv('VMWARE_CREDENTIALS_FILE', 'credentials.json')}")
         except Exception as exc:
@@ -567,7 +565,7 @@ async def _interactive_single(provider: VmwareProvider) -> None:
                 step = 3
                 continue
             verify_command = result
-            result = choose_value("用哪个 shell 执行", ["cmd", "powershell"], default="powershell")
+            result = choose_value("用哪个 shell 执行验证命令", ["cmd", "powershell"], default="cmd")
             if result is _BACK:
                 step = 3
                 continue
@@ -925,8 +923,7 @@ async def build_config_interactively(
         sample_command = input("Sample command: ").strip()
         if not sample_command:
             raise ValueError("Sample command is required")
-        sample_shell = Shell(choose_value("Sample shell", [shell.value for shell in Shell], default=Shell.CMD.value))
-        sample = CommandConfig(command=sample_command, shell=sample_shell)
+        sample = CommandConfig(command=sample_command, shell=Shell.CMD)
         samples = ()
 
     print("Verification command 是样本运行前后都要执行的验证命令，用来观察是否发生变化。")
@@ -934,7 +931,7 @@ async def build_config_interactively(
     verify_command = input("Verification command: ").strip()
     if not verify_command:
         raise ValueError("Verification command is required")
-    verify_shell = Shell(choose_value("Verification shell", [shell.value for shell in Shell], default=Shell.POWERSHELL.value))
+    verify_shell = Shell(choose_value("Verification shell", [shell.value for shell in Shell], default=Shell.CMD.value))
 
     guest_user = input("Guest user inside VM (example: Administrator): ").strip()
     if not guest_user:
