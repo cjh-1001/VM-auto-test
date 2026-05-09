@@ -4,10 +4,11 @@ import asyncio
 import os
 import sys
 
-from vm_auto_test.models import GuestCredentials, Shell
+from vm_auto_test.env import resolve_guest_credentials
+from vm_auto_test.models import Shell
 from vm_auto_test.providers.vmrun_provider import VmrunProvider
 
-_REQUIRED_ENV = ("VM_AUTO_TEST_SMOKE_VM_ID", "VMWARE_GUEST_USER", "VMWARE_GUEST_PASSWORD")
+_REQUIRED_ENV = ("VM_AUTO_TEST_SMOKE_VM_ID",)
 
 
 def missing_smoke_env() -> list[str]:
@@ -21,7 +22,11 @@ async def main_async() -> int:
         return 2
 
     vm_id = os.environ["VM_AUTO_TEST_SMOKE_VM_ID"]
-    credentials = GuestCredentials(os.environ["VMWARE_GUEST_USER"], os.environ["VMWARE_GUEST_PASSWORD"])
+    credentials = resolve_guest_credentials(vm_id)
+    if credentials is None:
+        print(f"No credentials found for {vm_id}. Run 'vm-auto-test' → [3] 列出 VM → 选择 VM → 配置凭证.", file=sys.stderr)
+        return 2
+
     provider = VmrunProvider()
 
     snapshots = await provider.list_snapshots(vm_id)

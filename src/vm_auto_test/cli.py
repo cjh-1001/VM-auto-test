@@ -8,7 +8,6 @@ import sys
 from pathlib import Path
 
 from vm_auto_test.config import (
-    DEFAULT_PASSWORD_ENV,
     CommandConfig,
     GuestConfig,
     NormalizeConfig,
@@ -68,7 +67,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--guest-user")
     run_parser.add_argument(
         "--guest-password",
-        help="Prefer VMWARE_GUEST_PASSWORD or prompt input",
+        help="Guest password",
     )
     run_parser.add_argument("--baseline-result", help="Required for AV mode")
     run_parser.add_argument("--reports-dir", default="reports")
@@ -270,7 +269,7 @@ async def main_async() -> None:
     if args.command == "run-config":
         config = load_config(Path(args.config))
         config_provider = create_provider(config.provider.type)
-        test_case = to_test_case(config, password=args.guest_password or os.getenv("VMWARE_GUEST_PASSWORD"))
+        test_case = to_test_case(config, password=args.guest_password)
         config_orchestrator = TestOrchestrator(config_provider, Path(config.reports_dir), progress=print_progress)
         if config.samples:
             batch_result = await config_orchestrator.run_batch(test_case)
@@ -380,6 +379,50 @@ def _prompt_back(prompt: str) -> str | None:
     if value.lower() == "b":
         return None
     return value
+
+
+async def _resolve_and_verify_credentials(
+    provider: VmwareProvider, vm_id: str
+) -> GuestCredentials | None:
+    """Resolve saved credentials, verify them, prompt to reconfigure on failure.
+
+    Returns credentials if ready, None if user backs out.
+    """
+    saved = resolve_guest_credentials(vm_id)
+    if saved:
+        print(f"  Guest 用户名: {saved.user}  (来自 credentials.json)")
+        print("  正在验证凭证 ...", flush=True)
+        try:
+            await provider.verify_guest_credentials(vm_id, saved)
+            print("  凭证验证成功 ✓")
+            return saved
+        except Exception as exc:
+            print(f"  凭证验证失败: {exc}")
+            print("  请重新配置凭证。")
+    else:
+        print("  该虚拟机暂无凭证，请先配置。")
+
+    print()
+    guest_user = input("  Guest 用户名: ").strip()
+    if not guest_user:
+        print("  已取消")
+        return None
+    guest_password = getpass.getpass("  Guest 密码: ")
+    if not guest_password:
+        print("  已取消")
+        return None
+    credentials = GuestCredentials(guest_user, guest_password)
+
+    print("  正在验证凭证 ...", flush=True)
+    try:
+        await provider.verify_guest_credentials(vm_id, credentials)
+        print("  凭证验证成功 ✓")
+        upsert_vm_credentials(vm_id, guest_user, guest_password)
+        print(f"  已保存到 {os.getenv('VMWARE_CREDENTIALS_FILE', 'credentials.json')}")
+        return credentials
+    except Exception as exc:
+        print(f"  凭证验证失败: {exc}")
+        return None
 
 
 async def _interactive_list_vms(provider: VmwareProvider) -> None:
@@ -576,21 +619,12 @@ async def _interactive_single(provider: VmwareProvider) -> None:
         # — step 5: Guest —
         if step == 5:
             print("\n  —— Guest 凭据 ——")
-            creds = resolve_guest_credentials(vm_id) if vm_id else None
-            if creds:
-                print(f"  Guest 用户名: {creds.user}")
-                guest_user = creds.user
-                guest_password = creds.password
-            else:
-                result = _prompt_back("Guest 用户名")
-                if result is None:
-                    step = 4
-                    continue
-                guest_user = result
-                guest_password = getpass.getpass("  Guest 密码: ")
-                if not guest_password:
-                    print("  密码不能为空")
-                    continue
+            creds = await _resolve_and_verify_credentials(provider, vm_id)
+            if creds is None:
+                step = 4
+                continue
+            guest_user = creds.user
+            guest_password = creds.password
             step = 6
             continue
 
@@ -725,21 +759,12 @@ async def _interactive_csv(provider: VmwareProvider) -> None:
         # — step 4: Guest —
         if step == 4:
             print("\n  —— Guest 凭据 ——")
-            creds = resolve_guest_credentials(vm_id) if vm_id else None
-            if creds:
-                print(f"  Guest 用户名: {creds.user}")
-                guest_user = creds.user
-                guest_password = creds.password
-            else:
-                result = _prompt_back("Guest 用户名")
-                if result is None:
-                    step = 3
-                    continue
-                guest_user = result
-                guest_password = getpass.getpass("  Guest 密码: ")
-                if not guest_password:
-                    print("  密码不能为空")
-                    continue
+            creds = await _resolve_and_verify_credentials(provider, vm_id)
+            if creds is None:
+                step = 3
+                continue
+            guest_user = creds.user
+            guest_password = creds.password
             step = 5
             continue
 
@@ -805,22 +830,16 @@ async def _interactive_setup(env_file: Path) -> None:
     vmware_port = _prompt_env("VMWARE_PORT", os.getenv("VMWARE_PORT") or "8697")
 
     existing = load_env_file_text(env_file)
-    vmware_user = _keep_existing("VMWARE_GUEST_USER", existing)
-    vmware_password = _keep_existing("VMWARE_GUEST_PASSWORD", existing)
     creds_file = _keep_existing("VMWARE_CREDENTIALS_FILE", existing) or "credentials.json"
 
     lines = [
         f"VMRUN_PATH={_quote_if_needed(vmrun_path)}",
+        "",
+        f"VMWARE_CREDENTIALS_FILE={_quote_if_needed(creds_file)}",
+        "",
+        f"VMWARE_HOST={vmware_host}",
+        f"VMWARE_PORT={vmware_port}",
     ]
-    if vmware_user:
-        lines.append(f"VMWARE_GUEST_USER={vmware_user}")
-    if vmware_password:
-        lines.append(f"VMWARE_GUEST_PASSWORD={vmware_password}")
-    lines.append("")
-    lines.append(f"VMWARE_CREDENTIALS_FILE={_quote_if_needed(creds_file)}")
-    lines.append("")
-    lines.append(f"VMWARE_HOST={vmware_host}")
-    lines.append(f"VMWARE_PORT={vmware_port}")
     env_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
     load_env_file(env_file, override=True)
     print("\n  ✓ 配置已保存\n")
@@ -877,10 +896,23 @@ def _quote_if_needed(value: str) -> str:
     return value
 
 
+def _display_width(text: str) -> int:
+    """Count display width: CJK chars = 2, ASCII = 1."""
+    return sum(2 if ord(c) > 127 else 1 for c in text)
+
+
+def _display_ljust(text: str, width: int) -> str:
+    """ljust that accounts for CJK display width."""
+    return text + " " * max(0, width - _display_width(text))
+
+
 def print_progress(step: StepResult) -> None:
+    status_col = _display_ljust(f"[{step.status}]", 10)
+    stage_col = _display_ljust(step.stage, 14) if step.stage else " " * 14
     label = step.name.replace("_", " ")
-    detail = f" - {step.detail}" if step.detail else ""
-    print(f"[{step.status}] {label}{detail}", flush=True)
+    name_col = _display_ljust(label, 24)
+    detail = step.detail if step.detail else ""
+    print(f"{status_col}{stage_col}{name_col}{detail}", flush=True)
 
 
 async def build_config_interactively(
@@ -936,16 +968,16 @@ async def build_config_interactively(
     guest_user = input("Guest user inside VM (example: Administrator): ").strip()
     if not guest_user:
         raise ValueError("Guest user is required")
-    print("Guest password env 只填环境变量名，不要填真实密码。")
-    print(f"如果 .env 里是 VMWARE_GUEST_PASSWORD=<your-password>，这里直接回车或填 {DEFAULT_PASSWORD_ENV}。")
-    password_env = input(f"Guest password env name [{DEFAULT_PASSWORD_ENV}]: ").strip() or DEFAULT_PASSWORD_ENV
+    guest_password = input("Guest password: ").strip()
+    if not guest_password:
+        raise ValueError("Guest password is required")
 
     return TestConfig(
         vm_id=selected_vm_id,
         snapshot=snapshot,
         mode=mode,
         baseline_result=baseline_result,
-        guest=GuestConfig(user=guest_user, password_env=password_env),
+        guest=GuestConfig(user=guest_user, password=guest_password),
         sample=sample,
         samples=samples,
         verification=VerificationConfig(command=verify_command, shell=verify_shell),

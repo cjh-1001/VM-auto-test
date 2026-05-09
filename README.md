@@ -107,21 +107,26 @@ copy .env.example .env
 
 已配置的 VM 在列表中会标注 `[已配置]`。也可以 `[1] 验证凭证` 测试现有配置是否有效，或 `[2] 重新配置` 修改。
 
+测试时会自动验证凭证：有凭证则先验证，通过即继续；验证失败或无凭证则引导用户配置。
+
 ---
 
 ## 测试流程
 
-每次单样本测试按以下步骤执行：
+每次单样本测试按 **5 个阶段** 执行，日志对齐输出：
 
-| 步骤 | 说明 |
-|---|---|
-| `revert snapshot` | 回滚到指定快照 |
-| `start vm` | 启动 VM |
-| `wait guest ready` | 等待 VMware Tools 就绪 + 验证 Guest 凭证（连续 5 次失败自动终止） |
-| `before verification` | 执行验证命令，获取 baseline |
-| `run sample` | 在 Guest 中执行测试样本 |
-| `after verification` | 再次执行验证命令，获取结果 |
-| `evaluate` | 比对前后输出，判定有效/无效 |
+| 阶段 | 步骤 | 说明 |
+|---|---|---|
+| 结果 | `create report dir` | 创建报告目录 |
+| 回滚快照 | `revert snapshot` | 回滚到指定快照 |
+| 验证环境 | `start vm` | 启动 VM |
+| | `wait guest ready` | 等待 VMware Tools 就绪 + 验证 Guest 凭证（连续 5 次失败自动终止） |
+| 验证攻击效果 | `before verification` | 执行验证命令，获取 baseline |
+| 运行恶意脚本 | `run sample` | 在 Guest 中执行测试样本 |
+| 验证攻击效果 | `after verification` | 再次执行验证命令，获取结果 |
+| | `collect av logs` | 采集 AV 日志 |
+| | `evaluate` | 比对前后输出，判定有效/无效 |
+| 结果 | `write report` | 生成报告文件 |
 
 ## 两种测试模式
 

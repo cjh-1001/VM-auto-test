@@ -44,12 +44,9 @@ def is_env_configured() -> bool:
 
 
 def resolve_guest_credentials(vm_id: str) -> GuestCredentials | None:
-    """Resolve guest credentials for a VM.
+    """Resolve guest credentials for a VM from credentials.json.
 
-    Lookup order:
-    1. VMWARE_CREDENTIALS_FILE JSON, keyed by vm_id (absolute .vmx path)
-    2. VMWARE_GUEST_USER / VMWARE_GUEST_PASSWORD env vars
-    3. Return None (caller should prompt)
+    Returns None if not found (caller should prompt).
     """
     creds_file = os.getenv("VMWARE_CREDENTIALS_FILE", "")
     if creds_file:
@@ -65,13 +62,6 @@ def resolve_guest_credentials(vm_id: str) -> GuestCredentials | None:
                     )
             except (json.JSONDecodeError, OSError):
                 pass
-
-    user = os.getenv("VMWARE_GUEST_USER", "")
-    if user:
-        return GuestCredentials(
-            user=user,
-            password=os.getenv("VMWARE_GUEST_PASSWORD", ""),
-        )
     return None
 
 

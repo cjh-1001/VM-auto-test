@@ -258,7 +258,10 @@ def test_choose_value_returns_default_for_empty_selection(monkeypatch):
 def test_print_progress_outputs_status_line(capsys):
     print_progress(StepResult("wait_guest_ready", "started", "vm1"))
 
-    assert capsys.readouterr().out == "[started] wait guest ready - vm1\n"
+    output = capsys.readouterr().out
+    assert "[started]" in output
+    assert "wait guest ready" in output
+    assert "vm1" in output
 
 
 def test_format_cli_error_shows_runtime_error_message():

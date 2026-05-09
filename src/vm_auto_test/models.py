@@ -152,6 +152,7 @@ class StepResult:
     name: str
     status: str
     detail: str = ""
+    stage: str = ""
 
 
 @dataclass(frozen=True)

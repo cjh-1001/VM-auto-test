@@ -46,6 +46,7 @@ class TestOrchestrator:
         self._provider = provider
         self._report_base_dir = report_base_dir
         self._progress = progress
+        self._stage = ""
 
     async def list_snapshots(self, vm_id: str) -> list[str]:
         return await self._provider.list_snapshots(vm_id)
@@ -102,13 +103,15 @@ class TestOrchestrator:
     def _emit(self, name: str, status: str, detail: str = "") -> None:
         if self._progress:
             try:
-                self._progress(StepResult(name, status, detail))
+                self._progress(StepResult(name, status, detail, self._stage))
             except Exception as exc:
                 _LOGGER.warning("Progress callback failed: %s", type(exc).__name__)
 
     async def run(self, test_case: TestCase) -> TestResult:
         self._validate_test_case(test_case)
         steps: list[StepResult] = []
+
+        self._stage = "结果"
         report_dir = self._run_sync_progress_step(
             "create_report_dir",
             "sample",
@@ -119,6 +122,8 @@ class TestOrchestrator:
         await self._prepare_vm(test_case, steps)
 
         verification = test_case.effective_verification()
+
+        self._stage = "验证攻击效果"
         before = await self._run_progress_step(
             "before_verification",
             "verification",
@@ -132,8 +137,9 @@ class TestOrchestrator:
             ),
             lambda result: result.capture_method,
         )
-        steps.append(StepResult("before_verification", "passed", before.capture_method))
+        steps.append(StepResult("before_verification", "passed", before.capture_method, self._stage))
 
+        self._stage = "运行恶意脚本"
         sample = await self._run_progress_step(
             "run_sample",
             "sample",
@@ -147,8 +153,9 @@ class TestOrchestrator:
             ),
             lambda result: result.capture_method,
         )
-        steps.append(StepResult("run_sample", "passed", sample.capture_method))
+        steps.append(StepResult("run_sample", "passed", sample.capture_method, self._stage))
 
+        self._stage = "验证攻击效果"
         after = await self._run_progress_step(
             "after_verification",
             "verification",
@@ -162,8 +169,9 @@ class TestOrchestrator:
             ),
             lambda result: result.capture_method,
         )
-        steps.append(StepResult("after_verification", "passed", after.capture_method))
+        steps.append(StepResult("after_verification", "passed", after.capture_method, self._stage))
 
+        self._stage = "验证攻击效果"
         logs = await self._run_progress_step(
             "collect_av_logs",
             str(len(test_case.av_log_collectors)),
@@ -171,15 +179,16 @@ class TestOrchestrator:
             lambda result: str(len(result)),
         )
         if logs:
-            steps.append(StepResult("collect_av_logs", "passed", str(len(logs))))
+            steps.append(StepResult("collect_av_logs", "passed", str(len(logs)), self._stage))
 
+        self._stage = "验证攻击效果"
         evaluation, classification = self._run_sync_progress_step(
             "evaluate",
             "comparisons",
             lambda: self._evaluate(before, after, verification, test_case),
             lambda result: result[1].value,
         )
-        steps.append(StepResult("evaluate", "passed", classification.value))
+        steps.append(StepResult("evaluate", "passed", classification.value, self._stage))
 
         result = TestResult(
             test_case=test_case,
@@ -193,6 +202,8 @@ class TestOrchestrator:
             evaluation=evaluation,
             logs=logs,
         )
+
+        self._stage = "结果"
         self._run_sync_progress_step(
             "write_report",
             "result.json",
@@ -203,6 +214,8 @@ class TestOrchestrator:
 
     async def run_batch(self, test_case: TestCase) -> BatchTestResult:
         self._validate_test_case(test_case)
+
+        self._stage = "结果"
         report_dir = self._run_sync_progress_step(
             "create_report_dir",
             "batch",
@@ -211,6 +224,8 @@ class TestOrchestrator:
         )
         sample_results: list[SampleTestResult] = []
         steps: list[StepResult] = []
+
+        self._stage = "运行恶意脚本"
         for sample in test_case.effective_samples():
             self._validate_sample_id(sample.id)
             sample_dir = report_dir / "samples" / sample.id
@@ -222,13 +237,15 @@ class TestOrchestrator:
                     sample.id,
                 )
             )
+
+        self._stage = "结果"
         classification = self._run_sync_progress_step(
             "batch_evaluate",
             "summary",
             lambda: batch_classification(tuple(result.classification for result in sample_results)),
             lambda result: result.value,
         )
-        steps.append(StepResult("batch_evaluate", "passed", classification.value))
+        steps.append(StepResult("batch_evaluate", "passed", classification.value, self._stage))
         result = BatchTestResult(
             test_case=test_case,
             report_dir=str(report_dir),
@@ -236,6 +253,8 @@ class TestOrchestrator:
             classification=classification,
             steps=tuple(steps),
         )
+
+        self._stage = "结果"
         self._run_sync_progress_step(
             "write_batch_report",
             "result.json",
@@ -251,15 +270,21 @@ class TestOrchestrator:
         report_dir: Path,
     ) -> SampleTestResult:
         steps: list[StepResult] = []
+
         await self._prepare_vm(test_case, steps)
+
         verification = sample.verification or test_case.effective_verification()
+
+        self._stage = "验证攻击效果"
         before = await self._run_progress_step(
             "before_verification",
             "verification",
             lambda: self._run_verification(test_case, verification),
             lambda result: result.capture_method,
         )
-        steps.append(StepResult("before_verification", "passed", before.capture_method))
+        steps.append(StepResult("before_verification", "passed", before.capture_method, self._stage))
+
+        self._stage = "运行恶意脚本"
         sample_result = await self._run_progress_step(
             "run_sample",
             "sample",
@@ -273,14 +298,18 @@ class TestOrchestrator:
             ),
             lambda result: result.capture_method,
         )
-        steps.append(StepResult("run_sample", "passed", sample_result.capture_method))
+        steps.append(StepResult("run_sample", "passed", sample_result.capture_method, self._stage))
+
+        self._stage = "验证攻击效果"
         after = await self._run_progress_step(
             "after_verification",
             "verification",
             lambda: self._run_verification(test_case, verification),
             lambda result: result.capture_method,
         )
-        steps.append(StepResult("after_verification", "passed", after.capture_method))
+        steps.append(StepResult("after_verification", "passed", after.capture_method, self._stage))
+
+        self._stage = "验证攻击效果"
         logs = await self._run_progress_step(
             "collect_av_logs",
             str(len(test_case.av_log_collectors)),
@@ -288,14 +317,16 @@ class TestOrchestrator:
             lambda result: str(len(result)),
         )
         if logs:
-            steps.append(StepResult("collect_av_logs", "passed", str(len(logs))))
+            steps.append(StepResult("collect_av_logs", "passed", str(len(logs)), self._stage))
+
+        self._stage = "验证攻击效果"
         evaluation, classification = self._run_sync_progress_step(
             "evaluate",
             "comparisons",
             lambda: self._evaluate(before, after, verification, test_case),
             lambda result: result[1].value,
         )
-        steps.append(StepResult("evaluate", "passed", classification.value))
+        steps.append(StepResult("evaluate", "passed", classification.value, self._stage))
         return SampleTestResult(
             test_case=test_case,
             sample_spec=sample,
@@ -311,19 +342,21 @@ class TestOrchestrator:
 
     async def _prepare_vm(self, test_case: TestCase, steps: list[StepResult]) -> None:
         if test_case.snapshot:
+            self._stage = "回滚快照"
             await self._run_progress_step(
                 "revert_snapshot",
                 "snapshot",
                 lambda: self._provider.revert_snapshot(test_case.vm_id, test_case.snapshot or ""),
             )
-            steps.append(StepResult("revert_snapshot", "passed", "snapshot"))
+            steps.append(StepResult("revert_snapshot", "passed", "snapshot", self._stage))
 
+        self._stage = "验证环境"
         await self._run_progress_step(
             "start_vm",
             "vm",
             lambda: self._provider.start_vm(test_case.vm_id),
         )
-        steps.append(StepResult("start_vm", "passed", "vm"))
+        steps.append(StepResult("start_vm", "passed", "vm", self._stage))
 
         await self._run_progress_step(
             "wait_guest_ready",
@@ -335,7 +368,7 @@ class TestOrchestrator:
                 progress=self._emit_step,
             ),
         )
-        steps.append(StepResult("wait_guest_ready", "passed", "guest tools"))
+        steps.append(StepResult("wait_guest_ready", "passed", "guest tools", self._stage))
 
     def _evaluate(
         self,
