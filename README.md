@@ -69,6 +69,12 @@ pip install -e .
 pip install -e .[dev]
 ```
 
+卸载：
+
+```bash
+pip uninstall vm-auto-test
+```
+
 ---
 
 ## 快速开始
