@@ -113,7 +113,7 @@ async def test_run_batch_emits_sample_progress_events(tmp_path):
 
     await TestOrchestrator(provider, tmp_path, progress=events.append).run_batch(test_case)
 
-    sample_events = [event for event in events if event.name == "run_batch_sample"]
+    sample_events = [event for event in events if event.name == "batch_sample"]
     assert [(event.status, event.detail) for event in sample_events] == [
         ("started", "one"),
         ("passed", "one"),

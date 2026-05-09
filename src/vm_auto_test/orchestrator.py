@@ -225,18 +225,15 @@ class TestOrchestrator:
         sample_results: list[SampleTestResult] = []
         steps: list[StepResult] = []
 
-        self._stage = "运行恶意脚本"
         for sample in test_case.effective_samples():
             self._validate_sample_id(sample.id)
             sample_dir = report_dir / "samples" / sample.id
-            sample_results.append(
-                await self._run_progress_step(
-                    "run_batch_sample",
-                    sample.id,
-                    lambda sample=sample, sample_dir=sample_dir: self._run_single_sample(test_case, sample, sample_dir),
-                    sample.id,
-                )
-            )
+            self._emit("batch_sample", "started", sample.id)
+            result = await self._run_single_sample(test_case, sample, sample_dir)
+            self._emit("batch_sample", "passed", sample.id)
+            sample_results.append(result)
+            steps.append(StepResult("batch_sample", "passed", sample.id, ""))
+            steps.extend(result.steps)
 
         self._stage = "结果"
         classification = self._run_sync_progress_step(

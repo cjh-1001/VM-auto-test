@@ -144,6 +144,7 @@ def to_batch_report_dict(result: BatchTestResult) -> dict[str, Any]:
                 "changed": sample.changed,
                 "effect_observed": sample.evaluation.effect_observed,
                 "report_dir": str(Path(sample.report_dir).relative_to(result.report_dir)),
+                "steps": [asdict(step) for step in sample.steps],
             }
             for sample in result.samples
         ],

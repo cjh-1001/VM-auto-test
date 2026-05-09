@@ -157,12 +157,20 @@ AV 模式必须先有一份已通过的 baseline 报告。
 ```
 reports/
 └── 20260509-023223-336747-1-A_schtasks/
-    ├── result.json          # 汇总
-    ├── before.txt           # 样本执行前验证命令输出
-    ├── after.txt            # 样本执行后验证命令输出
-    ├── sample_stdout.txt    # 样本 stdout
-    └── sample_stderr.txt    # 样本 stderr
+    ├── result.json
+    ├── before.txt
+    ├── after.txt
+    ├── sample_stdout.txt
+    └── sample_stderr.txt
 ```
+
+| 文件 | 内容 |
+|---|---|
+| `result.json` | 汇总：判定结果、分类、所有步骤记录、验证输出比对详情 |
+| `before.txt` | 样本执行前验证命令的 stdout+stderr 输出 |
+| `after.txt` | 样本执行后验证命令的 stdout+stderr 输出 |
+| `sample_stdout.txt` | 样本自身的标准输出 |
+| `sample_stderr.txt` | 样本自身的标准错误输出 |
 
 ## CSV 批量测试
 

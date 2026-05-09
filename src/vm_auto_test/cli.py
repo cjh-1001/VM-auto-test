@@ -196,9 +196,11 @@ async def main_async() -> None:
         )
         batch_result = await run_dir_orchestrator.run_batch(test_case)
         print(f"结果: {_classify_cn(batch_result.classification)}  ({batch_result.classification.value})  共 {len(batch_result.samples)} 个样本")
+        max_id_width = max((_display_width(s.sample_spec.id) for s in batch_result.samples), default=0)
         for sample_item in batch_result.samples:
-            print(f"sample={sample_item.sample_spec.id} {_classify_cn(sample_item.classification, short=True)} changed={sample_item.changed}")
-        print(f"report_dir={batch_result.report_dir}")
+            label = _classify_cn(sample_item.classification, short=True)
+            print(f"  {_display_ljust(sample_item.sample_spec.id, max_id_width + 2)}  {label}")
+        print(f"  报告: {batch_result.report_dir}")
         return
 
     if args.command == "run-csv":
@@ -254,9 +256,11 @@ async def main_async() -> None:
         )
         batch_result = await csv_orchestrator.run_batch(test_case)
         print(f"结果: {_classify_cn(batch_result.classification)}  ({batch_result.classification.value})  共 {len(batch_result.samples)} 个样本")
+        max_id_width = max((_display_width(s.sample_spec.id) for s in batch_result.samples), default=0)
         for sample_item in batch_result.samples:
-            print(f"sample={sample_item.sample_spec.id} {_classify_cn(sample_item.classification, short=True)} changed={sample_item.changed}")
-        print(f"report_dir={batch_result.report_dir}")
+            label = _classify_cn(sample_item.classification, short=True)
+            print(f"  {_display_ljust(sample_item.sample_spec.id, max_id_width + 2)}  {label}")
+        print(f"  报告: {batch_result.report_dir}")
         return
 
     if args.command == "init-config":
@@ -274,9 +278,11 @@ async def main_async() -> None:
         if config.samples:
             batch_result = await config_orchestrator.run_batch(test_case)
             print(f"结果: {_classify_cn(batch_result.classification)}  ({batch_result.classification.value})  共 {len(batch_result.samples)} 个样本")
+            max_id_width = max((_display_width(s.sample_spec.id) for s in batch_result.samples), default=0)
             for sample in batch_result.samples:
-                print(f"  {sample.sample_spec.id}  {_classify_cn(sample.classification, short=True)}")
-            print(f"report_dir={batch_result.report_dir}")
+                label = _classify_cn(sample.classification, short=True)
+                print(f"  {_display_ljust(sample.sample_spec.id, max_id_width + 2)}  {label}")
+            print(f"  报告: {batch_result.report_dir}")
             return
         result = await config_orchestrator.run(test_case)
         print(f"结果: {_classify_cn(result.classification)}")
@@ -813,8 +819,10 @@ async def _interactive_csv(provider: VmwareProvider) -> None:
             except VmToolsNotReadyError:
                 return
             print(f"\n  {_classify_cn(batch_result.classification)}  ({batch_result.classification.value})  共 {len(batch_result.samples)} 个样本")
+            max_id_width = max((_display_width(s.sample_spec.id) for s in batch_result.samples), default=0)
             for s in batch_result.samples:
-                print(f"    {s.sample_spec.id}  {_classify_cn(s.classification, short=True)}")
+                label = _classify_cn(s.classification, short=True)
+                print(f"    {_display_ljust(s.sample_spec.id, max_id_width + 2)}  {label}")
             print(f"  报告: {batch_result.report_dir}")
             return
 
