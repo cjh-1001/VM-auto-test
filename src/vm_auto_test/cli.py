@@ -382,12 +382,12 @@ async def _interactive_menu(provider: VmwareProvider, env_file: Path) -> None:
 
 
 def _prompt_back(prompt: str) -> str | None:
-    """input() wrapper: returns None on 'b' (go back), strips whitespace."""
+    """input() wrapper: returns None on 'b' (go back), strips whitespace and quotes."""
     print("  输入 b 返回上一步")
     value = input(f"  {prompt}: ").strip()
     if value.lower() == "b":
         return None
-    return value
+    return clean_cli_value(value)
 
 
 async def _resolve_and_verify_credentials(
@@ -788,16 +788,6 @@ async def _interactive_csv(provider: VmwareProvider) -> None:
             sample_configs_raw = parse_csv_samples(csv_path, samples_base_dir=samples_base_dir)
             creds_obj = GuestCredentials(guest_user, guest_password)
 
-            # Check if any verify command has %VAR% — query active user once
-            has_env_vars = any(
-                cfg.verification and cfg.verification.command
-                and _ENV_VAR_RE.search(cfg.verification.command)
-                for cfg in sample_configs_raw
-            )
-            active_user = None
-            if has_env_vars:
-                active_user = await _query_active_user(provider, vm_id, creds_obj)
-
             sample_configs: list = []
             for cfg in sample_configs_raw:
                 v_resolved = cfg.verification
@@ -806,7 +796,6 @@ async def _interactive_csv(provider: VmwareProvider) -> None:
                         provider, vm_id,
                         cfg.verification.command,
                         creds_obj,
-                        active_user=active_user,
                     )
                     if resolved_cmd != cfg.verification.command:
                         v_resolved = VerificationConfig(
@@ -1095,9 +1084,8 @@ async def _resolve_env_vars_in_command(
     vm_id: str,
     command: str,
     credentials: "GuestCredentials",
-    active_user: str | None = None,
 ) -> str:
-    """Detect %VAR% in command, expand, substitute active user path."""
+    """Detect %VAR% in command and expand via echo on guest VM."""
     var_names = _ENV_VAR_RE.findall(command)
     if not var_names:
         return command
@@ -1118,55 +1106,7 @@ async def _resolve_env_vars_in_command(
         except Exception:
             continue
 
-    if expanded == command:
-        return command
-
-    # Resolve active user if not cached
-    if active_user is None:
-        try:
-            qr = await provider.run_guest_command(
-                vm_id, "query user", Shell.CMD, credentials, timeout_seconds=10,
-            )
-            active_user = _parse_active_console_user(qr.stdout)
-        except Exception:
-            active_user = None
-
-    if not active_user:
-        return expanded
-
-    auth_user = credentials.user
-    if auth_user.lower() == active_user.lower():
-        return expanded
-
-    old_prefix = f"C:\\Users\\{auth_user}\\"
-    new_prefix = f"C:\\Users\\{active_user}\\"
-    if old_prefix not in expanded:
-        return expanded
-
-    return expanded.replace(old_prefix, new_prefix)
-
-
-async def _query_active_user(
-    provider: "VmwareProvider",
-    vm_id: str,
-    credentials: "GuestCredentials",
-) -> str | None:
-    try:
-        qr = await provider.run_guest_command(
-            vm_id, "query user", Shell.CMD, credentials, timeout_seconds=10,
-        )
-        return _parse_active_console_user(qr.stdout)
-    except Exception:
-        return None
-
-
-def _parse_active_console_user(query_output: str) -> str | None:
-    for line in query_output.splitlines():
-        if "Active" in line and "console" in line:
-            parts = line.split()
-            if parts:
-                return parts[0]
-    return None
+    return expanded
 
 
 def main() -> None:

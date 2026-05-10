@@ -30,11 +30,12 @@ Before running `vm-auto-test`, check or ask for:
 2. The target VM is a `.vmx` path or a running VM returned by `vm-auto-test vms`.
 3. VMware Tools is installed and ready inside the guest.
 4. VM access control encryption is disabled; encrypted VMs often cause `vmrun` snapshot commands to hang or fail.
-5. A local guest administrator account exists. Microsoft online accounts usually do not work with `vmrun` guest auth.
+5. A local guest administrator account exists (not a Microsoft online account — `vmrun` guest auth only supports local accounts).
 6. Guest credentials are configured through the interactive menu or available through the configured credential store.
 7. A clean snapshot exists for baseline mode, and an AV-installed snapshot exists for AV mode if needed.
 8. The sample path is the path inside the guest VM, not necessarily the host path.
 9. The verification command observes a real effect of the sample and is safe to run before and after execution.
+10. **All guest commands (sample, verify, env-var expansion) run as the credential user, not the desktop user.** If a sample creates user-specific artifacts (e.g. startup folder LNK, `HKCU` registry keys), they affect the credential user's profile. Verification commands should target that same user's context — `%APPDATA%` and `HKCU` automatically resolve correctly because they run as the credential user.
 
 ## Choosing the right command
 
@@ -273,7 +274,7 @@ Do not invent vendor-specific collectors unless the user provides the exact safe
 | Guest authentication fails repeatedly | Wrong local credentials or Microsoft online account | Use a local administrator account and reconfigure credentials through the menu. |
 | AV mode says missing baseline | `--baseline-result` absent or not `BASELINE_VALID` | Run baseline first and pass its `result.json`. |
 | CSV parse error | Encoding or column mismatch | Save as CSV UTF-8/GBK with 3 columns. |
-| `BASELINE_INVALID` | Verification command does not observe the effect | Choose a better verification command; do not change the sample to evade tools. |
+| `BASELINE_INVALID` | Verification command does not observe the effect, or user-specific path mismatch | Choose a better verification command; or verify the path targets the credential user, not a different user or the desktop user. Use `%APPDATA%` instead of hardcoded `C:\Users\<name>\` paths. |
 
 ## Development checks
 

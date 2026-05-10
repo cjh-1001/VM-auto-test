@@ -410,7 +410,7 @@ def _safe_sample_id(command: str) -> str:
 def _sanitize_id(raw: str) -> str:
     import re
 
-    s = "".join(char if char not in "/\\" and char.isprintable() else "-" for char in raw)
+    s = "".join(char if char not in r"/\\:*?\"<>|" and char.isprintable() else "-" for char in raw)
     s = re.sub(r"-{2,}", "-", s)
     return s.strip("-_")
 
