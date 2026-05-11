@@ -225,6 +225,13 @@ reports/
 | `test.log` | 执行日志：带时间戳的步骤记录与命令输出，可实时查看 |
 | `screenshot.png` | VM 屏幕截图（可选，交互菜单或 `--capture-screenshot` 开启） |
 
+批量测试会在批量报告根目录额外生成：
+
+| 文件 | 内容 |
+|---|---|
+| `result.csv` | 批量样本汇总，UTF-8 BOM 编码，便于 Excel 打开 |
+| `result.html` | 静态 HTML 汇总页，包含总体分类、分类计数、样本表和各样本报告链接 |
+
 批量测试时每个样本独立子目录：`reports/<timestamp>-batch/samples/<样本ID>/`。
 
 ---

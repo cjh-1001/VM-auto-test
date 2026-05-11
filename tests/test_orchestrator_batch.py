@@ -63,7 +63,7 @@ async def test_run_batch_rejects_programmatic_unsafe_sample_id(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_run_batch_av_requires_valid_batch_baseline(tmp_path):
+async def test_run_batch_av_accepts_optional_batch_baseline(tmp_path):
     baseline_path = tmp_path / "baseline.json"
     baseline_path.write_text(
         json.dumps(
@@ -92,6 +92,29 @@ async def test_run_batch_av_requires_valid_batch_baseline(tmp_path):
 
     assert result.classification == Classification.AV_BLOCKED_OR_NO_CHANGE
     assert result.samples[0].classification == Classification.AV_BLOCKED_OR_NO_CHANGE
+
+
+@pytest.mark.asyncio
+async def test_run_batch_av_without_baseline_result(tmp_path):
+    provider = FakeProvider(outputs=["NONE", "same", "sample", "same"])
+    test_case = TestCase(
+        vm_id="vm1",
+        snapshot="av",
+        mode=TestMode.AV,
+        sample_command="legacy.exe",
+        verify_command="verify",
+        credentials=GuestCredentials("user", "pass"),
+        samples=(SampleSpec(id="one", command="one.exe"),),
+    )
+
+    result = await TestOrchestrator(provider, tmp_path).run_batch(test_case)
+
+    assert result.classification == Classification.AV_BLOCKED_OR_NO_CHANGE
+    assert result.samples[0].classification == Classification.AV_BLOCKED_OR_NO_CHANGE
+    assert result.test_case.baseline_result is None
+    report_dir = tmp_path / result.report_dir
+    assert (report_dir / "result.csv").exists()
+    assert (report_dir / "result.html").exists()
 
 
 @pytest.mark.asyncio

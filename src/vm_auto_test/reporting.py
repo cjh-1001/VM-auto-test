@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import csv
+import html
 import json
 from dataclasses import asdict
 from datetime import datetime
@@ -7,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from vm_auto_test.evaluator import output_hash
-from vm_auto_test.models import BatchTestResult, Classification, SampleTestResult, TestResult
+from vm_auto_test.models import BatchTestResult, Classification, SampleTestResult, TestResult, VerificationSpec
 from vm_auto_test.config import _sanitize_id
 
 
@@ -68,6 +70,8 @@ def write_batch_report(result: BatchTestResult) -> None:
         json.dumps(to_batch_report_dict(result), ensure_ascii=False, indent=2),
         encoding="utf-8-sig",
     )
+    _write_batch_csv(result, report_dir)
+    _write_batch_html(result, report_dir)
 
 
 def to_report_dict(result: TestResult) -> dict[str, Any]:
@@ -150,6 +154,191 @@ def to_batch_report_dict(result: BatchTestResult) -> dict[str, Any]:
         ],
         "steps": [asdict(step) for step in result.steps],
     }
+
+
+_BATCH_CSV_FIELDS = (
+    "schema_version",
+    "mode",
+    "vm_id",
+    "snapshot",
+    "baseline_result",
+    "overall_classification",
+    "sample_id",
+    "sample_command",
+    "verify_command",
+    "verify_shell",
+    "classification",
+    "changed",
+    "effect_observed",
+    "before_hash",
+    "after_hash",
+    "sample_capture_method",
+    "before_capture_method",
+    "after_capture_method",
+    "av_log_count",
+    "report_dir",
+)
+
+
+_EXCEL_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _write_batch_csv(result: BatchTestResult, report_dir: Path) -> None:
+    with (report_dir / "result.csv").open("w", encoding="utf-8-sig", newline="") as file:
+        writer = csv.DictWriter(file, fieldnames=_BATCH_CSV_FIELDS)
+        writer.writeheader()
+        for row in _batch_csv_rows(result):
+            writer.writerow({key: _safe_csv_cell(value) for key, value in row.items()})
+
+
+def _batch_csv_rows(result: BatchTestResult) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for sample in result.samples:
+        verification = _sample_verification(result, sample)
+        rows.append(
+            {
+                "schema_version": 2,
+                "mode": result.test_case.mode.value,
+                "vm_id": result.test_case.vm_id,
+                "snapshot": result.test_case.snapshot or "",
+                "baseline_result": result.test_case.baseline_result or "",
+                "overall_classification": result.classification.value,
+                "sample_id": sample.sample_spec.id,
+                "sample_command": sample.sample_spec.command,
+                "verify_command": verification.command,
+                "verify_shell": verification.shell.value,
+                "classification": sample.classification.value,
+                "changed": _bool_text(sample.changed),
+                "effect_observed": _bool_text(sample.evaluation.effect_observed),
+                "before_hash": output_hash(sample.before.combined_output),
+                "after_hash": output_hash(sample.after.combined_output),
+                "sample_capture_method": sample.sample.capture_method,
+                "before_capture_method": sample.before.capture_method,
+                "after_capture_method": sample.after.capture_method,
+                "av_log_count": len(sample.logs),
+                "report_dir": _relative_sample_report_dir(result, sample),
+            }
+        )
+    return rows
+
+
+def _safe_csv_cell(value: Any) -> str:
+    text = "" if value is None else str(value)
+    if text.startswith(_EXCEL_FORMULA_PREFIXES):
+        return f"'{text}"
+    return text
+
+
+def _write_batch_html(result: BatchTestResult, report_dir: Path) -> None:
+    counts = _classification_counts(result)
+    count_items = "".join(
+        f"<li><strong>{_html_escape(key)}</strong>: {_html_escape(value)}</li>"
+        for key, value in counts.items()
+    )
+    sample_rows = "\n".join(_sample_html_row(result, sample, report_dir) for sample in result.samples)
+    html_text = f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>VM Auto Test Batch Report</title>
+  <style>
+    body {{ font-family: Arial, sans-serif; margin: 2rem; color: #1f2937; }}
+    table {{ border-collapse: collapse; width: 100%; }}
+    th, td {{ border: 1px solid #d1d5db; padding: 0.5rem; vertical-align: top; }}
+    th {{ background: #f3f4f6; text-align: left; }}
+    code {{ white-space: pre-wrap; word-break: break-word; }}
+  </style>
+</head>
+<body>
+  <h1>VM Auto Test Batch Report</h1>
+  <section>
+    <h2>Summary</h2>
+    <dl>
+      <dt>Mode</dt><dd>{_html_escape(result.test_case.mode.value)}</dd>
+      <dt>VM</dt><dd><code>{_html_escape(result.test_case.vm_id)}</code></dd>
+      <dt>Snapshot</dt><dd>{_html_escape(result.test_case.snapshot or "")}</dd>
+      <dt>Baseline result</dt><dd><code>{_html_escape(result.test_case.baseline_result or "")}</code></dd>
+      <dt>Total samples</dt><dd>{len(result.samples)}</dd>
+      <dt>Overall classification</dt><dd>{_html_escape(result.classification.value)}</dd>
+    </dl>
+    <h3>Classification counts</h3>
+    <ul>{count_items}</ul>
+    <p><a href="result.json">result.json</a> · <a href="result.csv">result.csv</a></p>
+  </section>
+  <section>
+    <h2>Samples</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Sample ID</th>
+          <th>Classification</th>
+          <th>Changed</th>
+          <th>Effect observed</th>
+          <th>Sample command</th>
+          <th>Verification command</th>
+          <th>Artifacts</th>
+        </tr>
+      </thead>
+      <tbody>
+{sample_rows}
+      </tbody>
+    </table>
+  </section>
+</body>
+</html>
+"""
+    (report_dir / "result.html").write_text(html_text, encoding="utf-8")
+
+
+def _sample_html_row(result: BatchTestResult, sample: SampleTestResult, report_dir: Path) -> str:
+    verification = _sample_verification(result, sample)
+    relative_dir = _relative_sample_report_dir(result, sample)
+    artifact_links = [
+        _html_link(f"{relative_dir}/result.json", "result.json"),
+        _html_link(f"{relative_dir}/before.txt", "before.txt"),
+        _html_link(f"{relative_dir}/after.txt", "after.txt"),
+        _html_link(f"{relative_dir}/sample_stdout.txt", "sample_stdout.txt"),
+        _html_link(f"{relative_dir}/sample_stderr.txt", "sample_stderr.txt"),
+    ]
+    screenshot_path = Path(sample.report_dir) / "screenshot.png"
+    if screenshot_path.exists():
+        artifact_links.append(_html_link(f"{relative_dir}/screenshot.png", "screenshot.png"))
+    return f"""        <tr>
+          <td>{_html_escape(sample.sample_spec.id)}</td>
+          <td>{_html_escape(sample.classification.value)}</td>
+          <td>{_html_escape(_bool_text(sample.changed))}</td>
+          <td>{_html_escape(_bool_text(sample.evaluation.effect_observed))}</td>
+          <td><code>{_html_escape(sample.sample_spec.command)}</code></td>
+          <td><code>{_html_escape(verification.command)}</code></td>
+          <td>{"<br>".join(artifact_links)}</td>
+        </tr>"""
+
+
+def _classification_counts(result: BatchTestResult) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for sample in result.samples:
+        counts[sample.classification.value] = counts.get(sample.classification.value, 0) + 1
+    return counts
+
+
+def _sample_verification(result: BatchTestResult, sample: SampleTestResult) -> VerificationSpec:
+    return sample.sample_spec.verification or result.test_case.effective_verification()
+
+
+def _relative_sample_report_dir(result: BatchTestResult, sample: SampleTestResult) -> str:
+    return Path(sample.report_dir).relative_to(result.report_dir).as_posix()
+
+
+def _html_escape(value: Any) -> str:
+    return html.escape("" if value is None else str(value), quote=True)
+
+
+def _html_link(href: str, label: str) -> str:
+    return f'<a href="{_html_escape(href)}">{_html_escape(label)}</a>'
+
+
+def _bool_text(value: bool) -> str:
+    return "true" if value else "false"
 
 
 def load_baseline_is_valid(path: str) -> bool:

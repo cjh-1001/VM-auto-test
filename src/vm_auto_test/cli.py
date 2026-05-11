@@ -71,7 +71,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--guest-password",
         help="Guest password",
     )
-    run_parser.add_argument("--baseline-result", help="Required for AV mode")
+    run_parser.add_argument("--baseline-result", help="Optional baseline report path for reference")
     run_parser.add_argument("--capture-screenshot", action="store_true", default=False, help="Capture VM screenshot after verification")
     run_parser.add_argument("--reports-dir", default="reports")
 
@@ -91,7 +91,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_dir_parser.add_argument("--verify-shell", choices=[shell.value for shell in Shell], default=Shell.POWERSHELL.value)
     run_dir_parser.add_argument("--guest-user")
     run_dir_parser.add_argument("--guest-password")
-    run_dir_parser.add_argument("--baseline-result", help="Required for AV mode")
+    run_dir_parser.add_argument("--baseline-result", help="Optional baseline report path for reference")
     run_dir_parser.add_argument("--capture-screenshot", action="store_true", default=False, help="Capture VM screenshot after verification")
     run_dir_parser.add_argument("--reports-dir", default="reports")
 
@@ -103,7 +103,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_csv_parser.add_argument("--samples-base-dir", help="Base directory on VM for relative sample paths")
     run_csv_parser.add_argument("--guest-user")
     run_csv_parser.add_argument("--guest-password")
-    run_csv_parser.add_argument("--baseline-result", help="Required for AV mode")
+    run_csv_parser.add_argument("--baseline-result", help="Optional baseline report path for reference")
     run_csv_parser.add_argument("--capture-screenshot", action="store_true", default=False, help="Capture VM screenshot after verification")
     run_csv_parser.add_argument("--reports-dir", default="reports")
 

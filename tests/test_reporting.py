@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 
 from vm_auto_test.models import (
@@ -10,15 +11,26 @@ from vm_auto_test.models import (
     GuestCredentials,
     SampleSpec,
     SampleTestResult,
+    Shell,
     StepResult,
     TestCase,
     TestMode,
+    VerificationSpec,
 )
 from vm_auto_test.reporting import load_baseline_is_valid, write_batch_report
 
 
-def make_sample_result(tmp_path, sample_id: str, classification: Classification) -> SampleTestResult:
-    test_case = TestCase(
+def make_sample_result(
+    tmp_path,
+    sample_id: str,
+    classification: Classification,
+    *,
+    test_case: TestCase | None = None,
+    sample_spec: SampleSpec | None = None,
+    before: str = "before",
+    after: str = "after",
+) -> SampleTestResult:
+    test_case = test_case or TestCase(
         vm_id="vm1",
         snapshot="clean",
         mode=TestMode.BASELINE,
@@ -26,14 +38,15 @@ def make_sample_result(tmp_path, sample_id: str, classification: Classification)
         verify_command="verify",
         credentials=GuestCredentials("user", "pass"),
     )
+    sample_spec = sample_spec or SampleSpec(id=sample_id, command=f"{sample_id}.exe")
     return SampleTestResult(
         test_case=test_case,
-        sample_spec=SampleSpec(id=sample_id, command=f"{sample_id}.exe"),
+        sample_spec=sample_spec,
         report_dir=str(tmp_path / "samples" / sample_id),
-        before=CommandResult(command="verify", stdout="before"),
-        sample=CommandResult(command=f"{sample_id}.exe", stdout="sample"),
-        after=CommandResult(command="verify", stdout="after"),
-        evaluation=EvaluationResult(changed=True, effect_observed=True),
+        before=CommandResult(command="verify", stdout=before),
+        sample=CommandResult(command=sample_spec.command, stdout="sample"),
+        after=CommandResult(command="verify", stdout=after),
+        evaluation=EvaluationResult(changed=before != after, effect_observed=before != after),
         classification=classification,
         steps=(StepResult("evaluate", "passed"),),
     )
@@ -63,6 +76,134 @@ def test_write_batch_report_creates_summary_and_sample_artifacts(tmp_path):
     assert data["summary"]["overall_classification"] == "BASELINE_VALID"
     assert (tmp_path / "samples" / "one" / "result.json").exists()
     assert (tmp_path / "samples" / "one" / "before.txt").read_text(encoding="utf-8-sig") == "before"
+
+
+def test_write_batch_report_creates_csv_and_html(tmp_path):
+    test_case = TestCase(
+        vm_id="vm1",
+        snapshot="clean",
+        mode=TestMode.BASELINE,
+        sample_command="sample.exe",
+        verify_command="verify",
+        credentials=GuestCredentials("user", "pass"),
+    )
+    report = BatchTestResult(
+        test_case=test_case,
+        report_dir=str(tmp_path),
+        samples=(
+            make_sample_result(tmp_path, "one", Classification.BASELINE_VALID, test_case=test_case),
+            make_sample_result(tmp_path, "two", Classification.BASELINE_INVALID, test_case=test_case, before="same", after="same"),
+        ),
+        classification=Classification.BASELINE_INVALID,
+    )
+
+    write_batch_report(report)
+
+    csv_path = tmp_path / "result.csv"
+    html_path = tmp_path / "result.html"
+    assert csv_path.exists()
+    assert html_path.exists()
+    rows = list(csv.DictReader(csv_path.read_text(encoding="utf-8-sig").splitlines()))
+    assert [row["sample_id"] for row in rows] == ["one", "two"]
+    assert rows[0]["classification"] == "BASELINE_VALID"
+    assert rows[0]["report_dir"] == "samples/one"
+    html = html_path.read_text(encoding="utf-8")
+    assert "VM Auto Test Batch Report" in html
+    assert "result.csv" in html
+    assert "samples/one/result.json" in html
+
+
+def test_batch_csv_neutralizes_excel_formula_cells(tmp_path):
+    test_case = TestCase(
+        vm_id="vm1",
+        snapshot="clean",
+        mode=TestMode.BASELINE,
+        sample_command="sample.exe",
+        verify_command="verify",
+        credentials=GuestCredentials("user", "pass"),
+    )
+    report = BatchTestResult(
+        test_case=test_case,
+        report_dir=str(tmp_path),
+        samples=(
+            make_sample_result(
+                tmp_path,
+                "formula",
+                Classification.BASELINE_VALID,
+                test_case=test_case,
+                sample_spec=SampleSpec(id="formula", command="=calc.exe"),
+            ),
+        ),
+        classification=Classification.BASELINE_VALID,
+    )
+
+    write_batch_report(report)
+
+    rows = list(csv.DictReader((tmp_path / "result.csv").read_text(encoding="utf-8-sig").splitlines()))
+    assert rows[0]["sample_command"] == "'=calc.exe"
+
+
+def test_batch_html_escapes_dynamic_values(tmp_path):
+    test_case = TestCase(
+        vm_id="vm<script>",
+        snapshot="clean&safe",
+        mode=TestMode.BASELINE,
+        sample_command="sample.exe",
+        verify_command="verify",
+        credentials=GuestCredentials("user", "pass"),
+    )
+    report = BatchTestResult(
+        test_case=test_case,
+        report_dir=str(tmp_path),
+        samples=(
+            make_sample_result(
+                tmp_path,
+                "html-sample",
+                Classification.BASELINE_VALID,
+                test_case=test_case,
+                sample_spec=SampleSpec(id="html-sample", command="<script>alert(1)</script>"),
+            ),
+        ),
+        classification=Classification.BASELINE_VALID,
+    )
+
+    write_batch_report(report)
+
+    html = (tmp_path / "result.html").read_text(encoding="utf-8")
+    assert "<script>alert(1)</script>" not in html
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
+    assert "vm&lt;script&gt;" in html
+    assert "clean&amp;safe" in html
+
+
+def test_batch_reports_use_sample_specific_verification(tmp_path):
+    test_case = TestCase(
+        vm_id="vm1",
+        snapshot="clean",
+        mode=TestMode.BASELINE,
+        sample_command="sample.exe",
+        verify_command="default verify",
+        credentials=GuestCredentials("user", "pass"),
+    )
+    sample_spec = SampleSpec(
+        id="one",
+        command="one.exe",
+        verification=VerificationSpec(command="sample verify", shell=Shell.CMD),
+    )
+    report = BatchTestResult(
+        test_case=test_case,
+        report_dir=str(tmp_path),
+        samples=(make_sample_result(tmp_path, "one", Classification.BASELINE_VALID, test_case=test_case, sample_spec=sample_spec),),
+        classification=Classification.BASELINE_VALID,
+    )
+
+    write_batch_report(report)
+
+    rows = list(csv.DictReader((tmp_path / "result.csv").read_text(encoding="utf-8-sig").splitlines()))
+    assert rows[0]["verify_command"] == "sample verify"
+    assert rows[0]["verify_shell"] == "cmd"
+    html = (tmp_path / "result.html").read_text(encoding="utf-8")
+    assert "sample verify" in html
 
 
 def test_load_baseline_accepts_batch_report_only_when_all_samples_valid(tmp_path):

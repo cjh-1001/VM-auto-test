@@ -312,9 +312,11 @@ Report schema versions are explicit in `result.json`:
 |---|---|---|
 | Single run `result.json` | `schema_version: 1` | Contains mode, classification, hashes, comparisons, AV logs, and steps. |
 | Batch root `result.json` | `schema_version: 2` | Contains summary counts, overall classification, sample list, and steps. |
+| Batch root `result.csv` | n/a | Excel-friendly UTF-8 BOM CSV with one row per sample. |
+| Batch root `result.html` | n/a | Static HTML summary with classification counts, sample table, and artifact links. |
 | Batch per-sample `samples/<sample_id>/result.json` | `schema_version: 2` | Contains sample command, verification command, hashes, comparisons, AV logs, and steps. |
 
-Batch reports include per-sample artifacts under `samples/<sample_id>/`. A batch baseline is valid only when every sample is `BASELINE_VALID` according to `load_baseline_is_valid`.
+Batch reports include per-sample artifacts under `samples/<sample_id>/`. A batch baseline is optional workflow metadata; when you do validate a batch baseline with `load_baseline_is_valid`, it is valid only when every sample is `BASELINE_VALID`.
 
 ## Comparison strategies
 
