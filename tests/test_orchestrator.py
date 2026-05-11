@@ -6,6 +6,7 @@ import json
 import pytest
 from pathlib import Path
 
+from vm_auto_test.av_detection import build_detection_command, parse_detection_result
 from vm_auto_test.cli import _BACK, choose_from_list, choose_value, clean_cli_value, format_cli_error, print_progress
 from vm_auto_test.evaluator import normalize_output
 from vm_auto_test.models import Classification, CommandResult, GuestCredentials, Shell, StepResult, TestCase, TestMode
@@ -49,13 +50,8 @@ async def test_baseline_is_invalid_when_verification_output_does_not_change(tmp_
 
 
 @pytest.mark.asyncio
-async def test_av_requires_valid_baseline_result(tmp_path):
-    baseline_path = tmp_path / "baseline.json"
-    baseline_path.write_text(
-        json.dumps({"classification": "BASELINE_INVALID"}),
-        encoding="utf-8",
-    )
-    provider = FakeProvider(before="same", after="same")
+async def test_av_runs_without_baseline_result(tmp_path):
+    provider = FakeProvider(outputs=["NONE", "same", "sample output", "same"])
     test_case = TestCase(
         vm_id="vm1",
         snapshot="av",
@@ -63,11 +59,11 @@ async def test_av_requires_valid_baseline_result(tmp_path):
         sample_command="C:\\Samples\\sample.exe",
         verify_command="Get-Item C:\\marker.txt",
         credentials=GuestCredentials("user", "pass"),
-        baseline_result=str(baseline_path),
     )
 
-    with pytest.raises(ValueError, match="BASELINE_VALID"):
-        await TestOrchestrator(provider, tmp_path).run(test_case)
+    result = await TestOrchestrator(provider, tmp_path).run(test_case)
+
+    assert result.classification == Classification.AV_BLOCKED_OR_NO_CHANGE
 
 
 @pytest.mark.asyncio
@@ -336,10 +332,12 @@ async def test_run_emits_progress_events(tmp_path):
         ("wait_guest_ready", "passed"),
         ("before_verification", "started"),
         ("before_verification", "passed"),
+        ("before_verification_output", "info"),
         ("run_sample", "started"),
         ("run_sample", "passed"),
         ("after_verification", "started"),
         ("after_verification", "passed"),
+        ("after_verification_output", "info"),
         ("evaluate", "started"),
         ("evaluate", "passed"),
         ("write_report", "started"),
@@ -347,7 +345,7 @@ async def test_run_emits_progress_events(tmp_path):
     ]
     assert events[0].detail == "sample"
     assert events[8].detail == "verification"
-    assert events[10].detail == "sample"
+    assert events[11].detail == "sample"
     assert "C:\\Samples\\sample.exe" not in [event.detail for event in events]
 
 
@@ -613,3 +611,108 @@ async def test_run_guest_command_cleans_all_guest_files_when_output_copy_fails()
         "C:\\Temp\\vmware-out.txt.user.bat",
         "C:\\Temp\\vmware-out.txt.wrapper.bat",
     ]
+
+
+# -- av_detection tests ------------------------------------------------------
+
+
+def test_build_detection_command_checks_all_signatures():
+    cmd = build_detection_command()
+
+    assert "QQPCTray\\.exe" in cmd
+    assert "360Tray\\.exe" in cmd
+    assert "HipsDaemon\\.exe" in cmd
+    assert "腾讯电脑管家" in cmd
+    assert "360安全卫士" in cmd
+    assert "火绒安全软件" in cmd
+    assert "NONE" in cmd
+
+
+def test_parse_detection_result_returns_none_for_empty():
+    assert parse_detection_result("") is None
+    assert parse_detection_result("   ") is None
+    assert parse_detection_result("NONE") is None
+
+
+def test_parse_detection_result_returns_name():
+    assert parse_detection_result("腾讯电脑管家") == "腾讯电脑管家"
+    assert parse_detection_result("360安全卫士,火绒安全软件") == "360安全卫士,火绒安全软件"
+
+
+@pytest.mark.asyncio
+async def test_detect_av_runs_in_av_mode(tmp_path):
+    provider = FakeProvider(outputs=["360安全卫士", "missing", "sample output", "present"])
+    events = []
+    baseline_path = tmp_path / "baseline.json"
+    baseline_path.write_text(
+        json.dumps({"classification": "BASELINE_VALID"}), encoding="utf-8",
+    )
+    test_case = TestCase(
+        vm_id="vm1",
+        snapshot="av",
+        mode=TestMode.AV,
+        sample_command="C:\\Samples\\sample.exe",
+        verify_command="Get-Item C:\\marker.txt",
+        credentials=GuestCredentials("user", "pass"),
+        baseline_result=str(baseline_path),
+    )
+
+    await TestOrchestrator(provider, tmp_path, progress=events.append).run(test_case)
+
+    names = [e.name for e in events]
+    assert "detect_av" in names
+    detect_events = [e for e in events if e.name == "detect_av"]
+    assert any(e.status == "passed" for e in detect_events)
+    assert any("360安全卫士" in e.detail for e in detect_events)
+
+
+@pytest.mark.asyncio
+async def test_detect_av_not_run_in_baseline_mode(tmp_path):
+    provider = FakeProvider(before="missing", after="present")
+    events = []
+
+    test_case = TestCase(
+        vm_id="vm1",
+        snapshot="clean",
+        mode=TestMode.BASELINE,
+        sample_command="C:\\Samples\\sample.exe",
+        verify_command="Get-Item C:\\marker.txt",
+        credentials=GuestCredentials("user", "pass"),
+    )
+
+    await TestOrchestrator(provider, tmp_path, progress=events.append).run(test_case)
+
+    assert not any(e.name == "detect_av" for e in events)
+
+
+@pytest.mark.asyncio
+async def test_detect_av_failure_is_non_fatal(tmp_path):
+    class FailingAvProvider(FakeProvider):
+        async def run_guest_command(self, vm_id, command, shell, credentials, timeout_seconds, progress=None):
+            self.commands.append(command)
+            if "tasklist" in command:
+                raise RuntimeError("detection failed")
+            return CommandResult(command=command, stdout=self._outputs.pop(0))
+
+    provider = FailingAvProvider(outputs=["NONE", "missing", "sample output", "present"])
+    events = []
+    baseline_path = tmp_path / "baseline.json"
+    baseline_path.write_text(
+        json.dumps({"classification": "BASELINE_VALID"}), encoding="utf-8",
+    )
+    test_case = TestCase(
+        vm_id="vm1",
+        snapshot="av",
+        mode=TestMode.AV,
+        sample_command="C:\\Samples\\sample.exe",
+        verify_command="Get-Item C:\\marker.txt",
+        credentials=GuestCredentials("user", "pass"),
+        baseline_result=str(baseline_path),
+    )
+
+    result = await TestOrchestrator(provider, tmp_path, progress=events.append).run(test_case)
+
+    detect_events = [e for e in events if e.name == "detect_av"]
+    assert any(e.status == "failed" for e in detect_events)
+    # Test still completed
+    assert result.classification == Classification.AV_NOT_BLOCKED

@@ -3,9 +3,11 @@ from __future__ import annotations
 import logging
 import re
 from collections.abc import Awaitable, Callable
+from datetime import datetime
 from pathlib import Path
 from typing import TypeVar
 
+from vm_auto_test.av_detection import build_detection_command, parse_detection_result
 from vm_auto_test.av_logs import collect_av_logs
 from vm_auto_test.evaluator import classify_result, evaluate_output
 from vm_auto_test.models import (
@@ -15,6 +17,7 @@ from vm_auto_test.models import (
     EvaluationResult,
     SampleSpec,
     SampleTestResult,
+    Shell,
     StepResult,
     TestCase,
     TestMode,
@@ -25,7 +28,6 @@ from vm_auto_test.providers.base import VmwareProvider
 from vm_auto_test.reporting import (
     batch_classification,
     create_report_dir,
-    load_baseline_is_valid,
     write_batch_report,
     write_report,
 )
@@ -53,6 +55,7 @@ class TestOrchestrator:
         self._report_base_dir = report_base_dir
         self._progress = progress
         self._stage = ""
+        self._log_path: Path | None = None
 
     async def list_snapshots(self, vm_id: str) -> list[str]:
         return await self._provider.list_snapshots(vm_id)
@@ -112,6 +115,26 @@ class TestOrchestrator:
                 self._progress(StepResult(name, status, detail, self._stage))
             except Exception as exc:
                 _LOGGER.warning("Progress callback failed: %s", type(exc).__name__)
+        self._write_log(name, status, detail)
+
+    def _write_log(self, name: str, status: str, detail: str) -> None:
+        if self._log_path is None:
+            return
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        stage_part = f"[{self._stage}] " if self._stage else ""
+        if name.endswith("_output"):
+            for line in detail.splitlines():
+                self._log_path.open("a", encoding="utf-8").write(
+                    f"{timestamp}  {stage_part}  │ {line}\n"
+                )
+        elif status == "passed":
+            self._log_path.open("a", encoding="utf-8").write(
+                f"{timestamp}  {stage_part}✓ {name}  {detail}\n"
+            )
+        elif status == "failed":
+            self._log_path.open("a", encoding="utf-8").write(
+                f"{timestamp}  {stage_part}✗ {name}  {detail}\n"
+            )
 
     async def run(self, test_case: TestCase) -> TestResult:
         self._validate_test_case(test_case)
@@ -124,6 +147,7 @@ class TestOrchestrator:
             lambda: create_report_dir(self._report_base_dir, Path(test_case.sample_command).stem or "sample"),
             lambda result: str(result),
         )
+        self._log_path = report_dir / "test.log"
 
         await self._prepare_vm(test_case, steps)
 
@@ -144,22 +168,15 @@ class TestOrchestrator:
             lambda result: result.capture_method,
         )
         steps.append(StepResult("before_verification", "passed", before.capture_method, self._stage))
+        self._emit_command_output("before_verification", before)
 
         self._stage = "运行恶意脚本"
-        sample = await self._run_progress_step(
-            "run_sample",
-            "sample",
-            lambda: self._provider.run_guest_command(
-                test_case.vm_id,
-                test_case.sample_command,
-                test_case.sample_shell,
-                test_case.credentials,
-                test_case.command_timeout_seconds,
-                progress=self._emit_step,
-            ),
-            lambda result: result.capture_method,
+        sample = await self._run_sample_safe(
+            test_case,
+            test_case.sample_command,
+            test_case.sample_shell,
         )
-        steps.append(StepResult("run_sample", "passed", sample.capture_method, self._stage))
+        steps.append(StepResult("run_sample", sample.exit_code == 0 and "passed" or "failed", sample.capture_method, self._stage))
 
         self._stage = "验证攻击效果"
         after = await self._run_progress_step(
@@ -176,21 +193,27 @@ class TestOrchestrator:
             lambda result: result.capture_method,
         )
         steps.append(StepResult("after_verification", "passed", after.capture_method, self._stage))
+        self._emit_command_output("after_verification", after)
 
         if test_case.capture_screenshot:
             self._stage = "验证攻击效果"
+            report_dir.mkdir(parents=True, exist_ok=True)
             screenshot_path = str(report_dir / "screenshot.png")
-            await self._run_progress_step(
-                "capture_screenshot",
-                "screenshot",
-                lambda: self._provider.capture_screen(
-                    test_case.vm_id,
+            try:
+                await self._run_progress_step(
+                    "capture_screenshot",
+                    "screenshot",
+                    lambda: self._provider.capture_screen(
+                        test_case.vm_id,
+                        screenshot_path,
+                        test_case.credentials,
+                    ),
                     screenshot_path,
-                    test_case.credentials,
-                ),
-                screenshot_path,
-            )
-            steps.append(StepResult("capture_screenshot", "passed", screenshot_path, self._stage))
+                )
+                steps.append(StepResult("capture_screenshot", "passed", screenshot_path, self._stage))
+            except Exception as exc:
+                self._emit("capture_screenshot", "failed", type(exc).__name__)
+                steps.append(StepResult("capture_screenshot", "failed", str(exc), self._stage))
 
         self._stage = "验证攻击效果"
         if test_case.av_log_collectors:
@@ -246,6 +269,7 @@ class TestOrchestrator:
             lambda: create_report_dir(self._report_base_dir, "batch"),
             lambda result: str(result),
         )
+        self._log_path = report_dir / "test.log"
         sample_results: list[SampleTestResult] = []
         steps: list[StepResult] = []
 
@@ -304,22 +328,11 @@ class TestOrchestrator:
             lambda result: result.capture_method,
         )
         steps.append(StepResult("before_verification", "passed", before.capture_method, self._stage))
+        self._emit_command_output("before_verification", before)
 
         self._stage = "运行恶意脚本"
-        sample_result = await self._run_progress_step(
-            "run_sample",
-            "sample",
-            lambda: self._provider.run_guest_command(
-                test_case.vm_id,
-                sample.command,
-                sample.shell,
-                test_case.credentials,
-                test_case.command_timeout_seconds,
-                progress=self._emit_step,
-            ),
-            lambda result: result.capture_method,
-        )
-        steps.append(StepResult("run_sample", "passed", sample_result.capture_method, self._stage))
+        sample_result = await self._run_sample_safe(test_case, sample.command, sample.shell)
+        steps.append(StepResult("run_sample", sample_result.exit_code == 0 and "passed" or "failed", sample_result.capture_method, self._stage))
 
         self._stage = "验证攻击效果"
         after = await self._run_progress_step(
@@ -329,21 +342,27 @@ class TestOrchestrator:
             lambda result: result.capture_method,
         )
         steps.append(StepResult("after_verification", "passed", after.capture_method, self._stage))
+        self._emit_command_output("after_verification", after)
 
         if test_case.capture_screenshot:
             self._stage = "验证攻击效果"
+            report_dir.mkdir(parents=True, exist_ok=True)
             screenshot_path = str(report_dir / "screenshot.png")
-            await self._run_progress_step(
-                "capture_screenshot",
-                "screenshot",
-                lambda: self._provider.capture_screen(
-                    test_case.vm_id,
+            try:
+                await self._run_progress_step(
+                    "capture_screenshot",
+                    "screenshot",
+                    lambda: self._provider.capture_screen(
+                        test_case.vm_id,
+                        screenshot_path,
+                        test_case.credentials,
+                    ),
                     screenshot_path,
-                    test_case.credentials,
-                ),
-                screenshot_path,
-            )
-            steps.append(StepResult("capture_screenshot", "passed", screenshot_path, self._stage))
+                )
+                steps.append(StepResult("capture_screenshot", "passed", screenshot_path, self._stage))
+            except Exception as exc:
+                self._emit("capture_screenshot", "failed", type(exc).__name__)
+                steps.append(StepResult("capture_screenshot", "failed", str(exc), self._stage))
 
         self._stage = "验证攻击效果"
         if test_case.av_log_collectors:
@@ -409,6 +428,19 @@ class TestOrchestrator:
         )
         steps.append(StepResult("wait_guest_ready", "passed", "guest tools", self._stage))
 
+        if test_case.mode == TestMode.AV:
+            self._stage = "验证环境"
+            try:
+                detected = await self._run_progress_step(
+                    "detect_av",
+                    "杀软识别",
+                    lambda: self._detect_av(test_case),
+                    lambda result: f"检测到: {result}" if result else "未检测到已知杀软",
+                )
+                steps.append(StepResult("detect_av", "passed", detected or "未识别", self._stage))
+            except Exception:
+                pass
+
     def _evaluate(
         self,
         before: CommandResult,
@@ -429,12 +461,45 @@ class TestOrchestrator:
             progress=self._emit_step,
         )
 
+    async def _detect_av(self, test_case: TestCase) -> str | None:
+        command = build_detection_command()
+        result = await self._provider.run_guest_command(
+            test_case.vm_id,
+            command,
+            Shell.POWERSHELL,
+            test_case.credentials,
+            test_case.command_timeout_seconds,
+            progress=self._emit_step,
+        )
+        return parse_detection_result(result.stdout)
+
+    def _emit_command_output(self, step_name: str, result: CommandResult) -> None:
+        output = result.combined_output.strip()
+        if output:
+            self._emit(f"{step_name}_output", "info", output)
+
+    async def _run_sample_safe(
+        self, test_case: TestCase, command: str, shell: Shell,
+    ) -> CommandResult:
+        try:
+            return await self._run_progress_step(
+                "run_sample",
+                "sample",
+                lambda: self._provider.run_guest_command(
+                    test_case.vm_id, command, shell,
+                    test_case.credentials, test_case.command_timeout_seconds,
+                    progress=self._emit_step,
+                ),
+                lambda result: result.capture_method,
+            )
+        except Exception:
+            return CommandResult(
+                command=command, stdout="", stderr="", exit_code=-1,
+                capture_method="blocked_or_timeout",
+            )
+
     def _validate_test_case(self, test_case: TestCase) -> None:
-        if test_case.mode == TestMode.AV:
-            if not test_case.baseline_result:
-                raise ValueError("AV mode requires a baseline result path")
-            if not load_baseline_is_valid(test_case.baseline_result):
-                raise ValueError("AV mode requires a BASELINE_VALID result")
+        pass
 
     def _validate_sample_id(self, sample_id: str) -> None:
         if not _SAMPLE_ID_PATTERN.fullmatch(sample_id):

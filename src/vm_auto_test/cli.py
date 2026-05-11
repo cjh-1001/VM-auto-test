@@ -518,7 +518,6 @@ async def _interactive_single(provider: VmwareProvider) -> None:
     vm_id: str | None = None
     snapshot: str | None = None
     mode: TestMode | None = None
-    baseline_result: str | None = None
     sample_command: str | None = None
     sample_shell: Shell | None = None
     verify_command: str | None = None
@@ -577,20 +576,12 @@ async def _interactive_single(provider: VmwareProvider) -> None:
         if step == 2:
             print("\n  —— 选择模式 ——")
             print("  baseline = 干净快照，验证样本是否有效（前后输出不同 → 有效）")
-            print("  av       = 带杀软快照，验证杀软能否拦截（需先通过 baseline）")
+            print("  av       = 带杀软快照，验证杀软能否拦截（启动后自动识别杀软环境）")
             result = choose_value("模式", ["baseline", "av"], default="baseline")
             if result is _BACK:
                 step = 1
                 continue
             mode = TestMode(result)
-            baseline_result = None
-            if mode == TestMode.AV:
-                print("  AV 模式需要一份已通过的 baseline 报告（result.json）来确认样本本身有效。")
-                result = _prompt_back("Baseline result.json 路径")
-                if result is None:
-                    step = 1
-                    continue
-                baseline_result = clean_cli_value(result)
             step = 3
             continue
 
@@ -650,8 +641,6 @@ async def _interactive_single(provider: VmwareProvider) -> None:
             print(f"  验证:     [{verify_shell.value}] {verify_command}")
             if capture_screenshot:
                 print(f"  截图:     是")
-            if baseline_result:
-                print(f"  baseline: {baseline_result}")
             confirm = input("  确认执行? [y/N]: ").strip().lower()
             if confirm == "b":
                 step = 5
@@ -665,7 +654,6 @@ async def _interactive_single(provider: VmwareProvider) -> None:
                 sample_command=sample_command, sample_shell=sample_shell,
                 verify_command=verify_command, verify_shell=verify_shell,
                 credentials=GuestCredentials(guest_user, guest_password),
-                baseline_result=baseline_result,
                 capture_screenshot=capture_screenshot,
             )
             orch = TestOrchestrator(provider, Path("reports"), progress=print_progress)
@@ -681,7 +669,6 @@ async def _interactive_csv(provider: VmwareProvider) -> None:
     vm_id: str | None = None
     snapshot: str | None = None
     mode: TestMode | None = None
-    baseline_result: str | None = None
     csv_path: Path | None = None
     samples_base_dir: str | None = None
     guest_user: str | None = None
@@ -738,20 +725,12 @@ async def _interactive_csv(provider: VmwareProvider) -> None:
         if step == 2:
             print("\n  —— 选择模式 ——")
             print("  baseline = 干净快照，验证样本是否有效（前后输出不同 → 有效）")
-            print("  av       = 带杀软快照，验证杀软能否拦截（需先通过 baseline）")
+            print("  av       = 带杀软快照，验证杀软能否拦截")
             result = choose_value("模式", ["baseline", "av"], default="baseline")
             if result is _BACK:
                 step = 1
                 continue
             mode = TestMode(result)
-            baseline_result = None
-            if mode == TestMode.AV:
-                print("  AV 模式需要一份已通过的 baseline 报告（result.json）来确认样本本身有效。")
-                result = _prompt_back("Baseline result.json 路径")
-                if result is None:
-                    step = 1
-                    continue
-                baseline_result = clean_cli_value(result)
             step = 3
             continue
 
@@ -815,8 +794,6 @@ async def _interactive_csv(provider: VmwareProvider) -> None:
             print(f"  VM:       {vm_id}")
             print(f"  快照:     {snapshot}")
             print(f"  模式:     {mode.value}")
-            if baseline_result:
-                print(f"  baseline: {baseline_result}")
             capture_screenshot = input("  截取 VM 截图? [y/N]: ").strip().lower() == "y"
             if capture_screenshot:
                 print(f"  截图:     是")
@@ -843,7 +820,6 @@ async def _interactive_csv(provider: VmwareProvider) -> None:
                 verify_command=first_v.command if first_v else "",
                 verify_shell=first_v.shell if first_v else Shell.POWERSHELL,
                 credentials=GuestCredentials(guest_user, guest_password),
-                baseline_result=baseline_result,
                 samples=tuple(sample_specs),
                 verification=first_v or VerificationSpec(command="", shell=Shell.POWERSHELL),
                 capture_screenshot=capture_screenshot,
@@ -922,10 +898,10 @@ def _strip_quotes_env(value: str) -> str:
 
 def _classify_cn(classification: Any, short: bool = False) -> str:
     mapping = {
-        "BASELINE_VALID": "有效" if short else "样本有效（前后输出有变化）",
-        "BASELINE_INVALID": "无效" if short else "样本无效（前后输出无变化）",
-        "AV_NOT_BLOCKED": "未拦截" if short else "杀软未拦截（攻击效果发生）",
-        "AV_BLOCKED_OR_NO_CHANGE": "已拦截" if short else "杀软已拦截或未生效",
+        "BASELINE_VALID": "✓ SUCCESS — 有效" if short else "样本有效（前后输出有变化）",
+        "BASELINE_INVALID": "✗ FAILED — 无效" if short else "样本无效（前后输出无变化）",
+        "AV_NOT_BLOCKED": "✗ FAILED — 未拦截" if short else "杀软未拦截（攻击效果发生）",
+        "AV_BLOCKED_OR_NO_CHANGE": "✓ SUCCESS — 已拦截" if short else "杀软已拦截或未生效",
     }
     value = classification.value if hasattr(classification, "value") else str(classification)
     return mapping.get(value, value)
@@ -953,6 +929,7 @@ _STEP_LABELS: dict[str, str] = {
     "revert_snapshot": "回滚到快照",
     "start_vm": "开机",
     "wait_guest_ready": "等待系统就绪",
+    "detect_av": "识别杀软环境",
     "before_verification": "攻击前环境检查",
     "run_sample": "执行恶意样本",
     "after_verification": "攻击后效果验证",
@@ -986,6 +963,11 @@ def print_progress(step: StepResult) -> None:
     if step.status == "started":
         return
 
+    # Command output: print indented under the preceding step
+    if step.name.endswith("_output"):
+        _print_indented(step.detail)
+        return
+
     # Stage header when stage changes
     stage = step.stage.strip()
     if stage and stage != _last_stage:
@@ -997,6 +979,12 @@ def print_progress(step: StepResult) -> None:
     label_col = _display_ljust(label, 18)
     detail = step.detail if step.detail else ""
     print(f"  {icon} {label_col}{detail}", flush=True)
+
+
+def _print_indented(text: str, indent: int = 6) -> None:
+    prefix = " " * indent
+    for line in text.splitlines():
+        print(f"{prefix}│ {line}", flush=True)
 
 
 async def build_config_interactively(
@@ -1018,13 +1006,6 @@ async def build_config_interactively(
     snapshot = choose_from_list(snapshots, "选择快照")
 
     mode = TestMode(mode_value or choose_value("Mode", [mode.value for mode in TestMode]))
-    baseline_result = None
-    if mode == TestMode.AV:
-        print("Baseline result path 填已经通过的 baseline result.json 路径。")
-        print("例如: reports\\20260507-120000-000000-sample\\result.json")
-        baseline_result = clean_cli_value(input("Baseline result path: "))
-        if not baseline_result:
-            raise ValueError("AV mode requires baseline result path")
 
     if samples_dir:
         sample_configs = scan_samples_from_directory(Path(samples_dir))
@@ -1060,7 +1041,6 @@ async def build_config_interactively(
         vm_id=selected_vm_id,
         snapshot=snapshot,
         mode=mode,
-        baseline_result=baseline_result,
         guest=GuestConfig(user=guest_user, password=guest_password),
         sample=sample,
         samples=samples,

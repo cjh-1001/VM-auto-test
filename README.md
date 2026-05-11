@@ -159,10 +159,12 @@ dir "%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\Updater.lnk"
 | 回滚快照 | `revert snapshot` | 回滚到指定快照 |
 | 验证环境 | `start vm` | 启动 VM |
 | | `wait guest ready` | 等待 VMware Tools 就绪 + 验证 Guest 凭证（连续 5 次失败自动终止） |
+| | `detect av` | （AV 模式）自动识别杀软环境 |
 | 验证攻击效果 | `before verification` | 执行验证命令，获取 baseline |
 | 运行恶意脚本 | `run sample` | 在 Guest 中执行测试样本 |
 | 验证攻击效果 | `after verification` | 再次执行验证命令，获取结果 |
-| | `collect av logs` | 采集 AV 日志 |
+| | `capture screenshot` | 截取 VM 画面（可选，交互菜单中开启） |
+| | `collect av logs` | 采集 AV 日志（配置了采集器时） |
 | | `evaluate` | 比对前后输出，判定有效/无效 |
 | 结果 | `write report` | 生成报告文件 |
 
@@ -172,17 +174,20 @@ dir "%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\Updater.lnk"
 |---|---|---|
 | `baseline` | 干净系统（无杀软） | 先确认样本本身有效 |
 | `av` | 装了杀软的系统 | 再看杀软能不能拦截 |
-
-AV 模式必须先有一份已通过的 baseline 报告。
+| | | 启动后自动识别杀软环境 |
 
 ### 结果判定
 
-| 判定结果 | 含义 |
-|---|---|
-| 有效 / `BASELINE_VALID` | 样本跑完后验证输出变了，样本有效 |
-| 无效 / `BASELINE_INVALID` | 验证输出无变化，样本无效 |
-| 未拦截 / `AV_NOT_BLOCKED` | 杀软没拦住，攻击效果发生 |
-| 已拦截 / `AV_BLOCKED_OR_NO_CHANGE` | 杀软拦截或未生效 |
+控制台输出以 ✓/✗ 区分：
+
+| 判定结果 | 控制台输出 | 含义 |
+|---|---|---|
+| `BASELINE_VALID` | `✓ SUCCESS — 有效` | 样本跑完后验证输出变了，样本有效 |
+| `BASELINE_INVALID` | `✗ FAILED — 无效` | 验证输出无变化，样本无效 |
+| `AV_NOT_BLOCKED` | `✗ FAILED — 未拦截` | 杀软没拦住，攻击效果发生 |
+| `AV_BLOCKED_OR_NO_CHANGE` | `✓ SUCCESS — 已拦截` | 杀软拦截或未生效 |
+
+控制台仅显示验证命令的输出（攻击前后对比），样本自身 stdout 写入 `sample_stdout.txt` 文件，不在控制台回显。
 
 ### CSV 批量测试
 
@@ -205,7 +210,9 @@ reports/
     ├── before.txt
     ├── after.txt
     ├── sample_stdout.txt
-    └── sample_stderr.txt
+    ├── sample_stderr.txt
+    ├── test.log
+    └── screenshot.png         (开启截图时)
 ```
 
 | 文件 | 内容 |
@@ -215,6 +222,8 @@ reports/
 | `after.txt` | 样本执行后验证命令的 stdout+stderr 输出 |
 | `sample_stdout.txt` | 样本自身的标准输出 |
 | `sample_stderr.txt` | 样本自身的标准错误输出 |
+| `test.log` | 执行日志：带时间戳的步骤记录与命令输出，可实时查看 |
+| `screenshot.png` | VM 屏幕截图（可选，交互菜单或 `--capture-screenshot` 开启） |
 
 批量测试时每个样本独立子目录：`reports/<timestamp>-batch/samples/<样本ID>/`。
 
@@ -253,8 +262,11 @@ av_logs:
 |---|---|
 | `vm-auto-test` | 交互菜单 |
 | `vm-auto-test run --vm ... --sample ... --verify ...` | 单样本测试 |
+| `vm-auto-test run --vm ... --sample ... --verify ... --capture-screenshot` | 单样本测试 + 截图 |
 | `vm-auto-test run-csv --csv ...` | CSV 批量测试 |
+| `vm-auto-test run-csv --csv ... --capture-screenshot` | CSV 批量测试 + 截图 |
 | `vm-auto-test run-dir --dir ...` | 扫描目录批量测试 |
+| `vm-auto-test run-dir --dir ... --capture-screenshot` | 扫描目录批量测试 + 截图 |
 | `vm-auto-test vms` | 列出运行中的 VM |
 | `vm-auto-test snapshots --vm ...` | 列出快照 |
 
@@ -301,7 +313,7 @@ pytest
 python -m compileall -q src tests
 ```
 
-当前 88 个测试，使用 `fake provider`，不需要真实 VMware 环境。
+当前 96 个测试，使用 `fake provider`，不需要真实 VMware 环境。
 
 真实 `VMware smoke test`（无害链路检查：列快照、启动、等 Tools、跑 `hostname`）：
 
@@ -322,6 +334,7 @@ vm-auto-test-smoke
 src/
 ├── vmware_mcp/              # 复用 VMware MCP / vmrun 封装
 └── vm_auto_test/            # 自动化测试框架
+    ├── av_detection.py      # 杀软环境自动识别
     ├── av_logs.py           # AV 日志采集接口
     ├── cli.py               # 命令行入口 + 交互菜单
     ├── config.py            # YAML/CSV 配置解析

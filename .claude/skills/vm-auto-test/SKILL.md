@@ -5,7 +5,7 @@ Use this skill when working on the local `vm-auto-test` project or helping the u
 The safe workflow is:
 
 ```text
-revert snapshot -> start VM -> wait for VMware Tools -> verify before -> run sample -> verify after -> collect configured logs -> write report
+revert snapshot -> start VM -> wait for VMware Tools -> detect AV when available -> verify before -> run sample -> verify after -> collect configured logs -> write report
 ```
 
 It only automates execution, observation, comparison, and reporting. Do not use it to generate samples, bypass detection, evade AV/EDR, establish persistence, move laterally, escalate privileges, or run tests outside an authorized local lab.
@@ -19,6 +19,7 @@ Before helping the user run a real test, confirm these boundaries:
 - Use a known rollback snapshot before executing any sample.
 - Do not run unknown samples on production hosts, shared systems, or non-owned VMs.
 - Do not print, summarize, or expose passwords from `.env`, YAML files, or `credentials.json`.
+- Treat `credentials.json` and YAML `guest.password` as sensitive plaintext credential storage; prefer `guest.password_env`, keep credential files out of version control, and restrict local file access.
 - Do not invent AV bypass, stealth, obfuscation, anti-analysis, persistence, privilege escalation, or payload-generation steps.
 - If the user asks for offensive capability beyond automation and comparison, refuse that part and redirect to safe validation/reporting workflows.
 
@@ -48,7 +49,7 @@ Check or ask for:
 4. VM access control encryption is disabled; encrypted VMs often make `vmrun` snapshot commands hang or fail.
 5. A local guest administrator account exists. Avoid Microsoft online accounts because `vmrun` guest auth expects local credentials.
 6. The credential user has logged into the VM desktop at least once so Windows creates that user profile directory.
-7. Guest credentials are configured through the interactive menu or provided through the intended credential mechanism.
+7. Guest credentials are configured through the interactive menu or provided through the intended credential mechanism; stored credential files are plaintext and must be protected.
 8. A clean snapshot exists for baseline mode; an AV-installed snapshot exists for AV mode when needed.
 9. The sample command resolves to a path that is valid inside the guest VM.
 10. The verification command observes a real, safe effect of the sample before/after execution.
@@ -99,6 +100,8 @@ The menu currently exposes:
 [5] 重新配置环境
 ```
 
+Optional screenshot capture is available for direct CLI batch/single runs with `--capture-screenshot`; interactive runs prompt for it before confirmation. Screenshots are saved as `screenshot.png` under each relevant report directory.
+
 ### 2. Discover VM and snapshots
 
 ```bash
@@ -121,6 +124,7 @@ vm-auto-test run \
   --sample-shell cmd \
   --verify-command "hostname" \
   --verify-shell powershell \
+  --capture-screenshot \
   --reports-dir reports
 ```
 
@@ -128,7 +132,7 @@ vm-auto-test run \
 
 ### 4. Single-sample AV test
 
-Run AV mode only after a baseline report classified as `BASELINE_VALID`:
+As a required safe workflow, run AV mode only after a baseline report classified as `BASELINE_VALID`:
 
 ```bash
 vm-auto-test run \
@@ -143,7 +147,7 @@ vm-auto-test run \
   --reports-dir reports
 ```
 
-AV mode checks whether the same observable effect still occurs in the AV snapshot. It does not tune around detection.
+AV mode checks whether the same observable effect still occurs in the AV snapshot. Treat `--baseline-result` as required workflow input even if the current CLI path does not hard-block every missing baseline case. During AV mode the orchestrator also runs a best-effort known-AV process check; detection failure is non-fatal. It does not tune around detection.
 
 ### 5. Directory batch test
 
@@ -234,9 +238,18 @@ provider:
   type: vmrun
 ```
 
-Multi-sample configs use `samples:` instead of `sample:`. Do not include both.
+Multi-sample configs use `samples:` instead of `sample:`. Do not include both. A top-level `verification` mapping is still required by the current parser; per-sample `verification` can override it during batch execution.
 
 ```yaml
+vm_id: "E:\\VM-MCP\\windows11\\Windows 11 x64.vmx"
+snapshot: "clean-snapshot"
+mode: baseline
+guest:
+  user: testuser
+  password_env: VMWARE_GUEST_PASSWORD
+verification:
+  command: "hostname"
+  shell: cmd
 samples:
   - id: sample-a
     command: "C:\\Samples\\a.exe"
@@ -250,6 +263,9 @@ samples:
     verification:
       command: "Get-Content C:\\marker-b.txt"
       shell: powershell
+reports_dir: reports
+provider:
+  type: vmrun
 ```
 
 ## Verification commands and environment variables
@@ -290,7 +306,15 @@ reports/<timestamp>-<sample>/
   sample_stderr.txt
 ```
 
-Batch reports include per-sample result directories under the batch report directory.
+Report schema versions are explicit in `result.json`:
+
+| Output | Schema | Notes |
+|---|---|---|
+| Single run `result.json` | `schema_version: 1` | Contains mode, classification, hashes, comparisons, AV logs, and steps. |
+| Batch root `result.json` | `schema_version: 2` | Contains summary counts, overall classification, sample list, and steps. |
+| Batch per-sample `samples/<sample_id>/result.json` | `schema_version: 2` | Contains sample command, verification command, hashes, comparisons, AV logs, and steps. |
+
+Batch reports include per-sample artifacts under `samples/<sample_id>/`. A batch baseline is valid only when every sample is `BASELINE_VALID` according to `load_baseline_is_valid`.
 
 ## Comparison strategies
 
@@ -318,7 +342,9 @@ verification:
       value: "created"
 ```
 
-## AV log collection
+## AV detection and log collection
+
+In AV mode, the project attempts a non-fatal best-effort process-name detection for known local AV products currently represented in `src/vm_auto_test/av_detection.py` (`腾讯电脑管家`, `360安全卫士`, `火绒安全软件`). Current detection checks one required process marker per known AV signature; it is reporting context only and must not be used to tailor bypass behavior.
 
 The tool only runs explicitly configured log collection commands:
 
@@ -340,11 +366,13 @@ Do not invent vendor-specific collectors unless the user provides the exact safe
 | Snapshot listing fails or times out | VM access control encryption or wrong `.vmx` path | Ask user to disable encryption and verify the VM path. |
 | `VmToolsNotReadyError` | VMware Tools missing, stopped, or guest not booted | Ask user to install/restart VMware Tools and retry. |
 | Repeated guest auth failures | Wrong local credentials, Microsoft online account, or user profile not initialized | Use a local administrator account, log in once, and reconfigure credentials. |
-| AV mode says missing baseline | `--baseline-result` absent or not from a `BASELINE_VALID` run | Run baseline first and pass its `result.json`. |
+| AV workflow lacks a valid baseline | `--baseline-result` absent or not from a `BASELINE_VALID` run | Run baseline first and pass its `result.json`; treat this as a required operating rule even where the CLI does not hard-block it. |
 | CSV parse error | Encoding, missing columns, relative sample without base dir, or invalid shell | Save as UTF-8/GBK CSV with `sample_file,verify_command,verify_shell`; set `--samples-base-dir` for relative paths. |
 | `BASELINE_INVALID` | Verification command does not observe the effect, wrong user profile, sample path invalid, or insufficient guest permissions | Choose a better verification command and ensure it targets the credential user's context. |
 | PowerShell verification with `%APPDATA%` fails in non-interactive CLI | `%VAR%` is cmd syntax and non-interactive CLI does not pre-resolve it | Use `$env:APPDATA` with PowerShell or run the verification with `cmd`. |
 | `run-dir` finds files but guest execution fails | Host-scanned paths are not valid inside the guest | Use shared/mirrored paths or switch to CSV with explicit guest paths. |
+| `detect_av` reports no known AV | AV not installed, process names differ, or unsupported product | Treat it as context only; continue using configured verification and logs. |
+| Screenshot missing | Screenshot capture failed or was not requested | Use `--capture-screenshot` or answer yes in interactive mode; check step status in `result.json`. |
 
 ## Development checks
 

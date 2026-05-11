@@ -76,7 +76,7 @@ async def test_run_batch_av_requires_valid_batch_baseline(tmp_path):
         ),
         encoding="utf-8",
     )
-    provider = FakeProvider(outputs=["same", "sample", "same"])
+    provider = FakeProvider(outputs=["NONE", "same", "sample", "same"])
     test_case = TestCase(
         vm_id="vm1",
         snapshot="av",

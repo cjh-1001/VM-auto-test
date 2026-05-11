@@ -58,7 +58,10 @@ class FakeProvider(VmwareProvider):
 
 
 async def run_case(tmp_path, mode: TestMode, before: str, after: str, baseline_result: str | None = None):
-    provider = FakeProvider(before=before, after=after)
+    if mode == TestMode.AV:
+        provider = FakeProvider(outputs=["NONE", before, "sample output", after])
+    else:
+        provider = FakeProvider(before=before, after=after)
     test_case = TestCase(
         vm_id="vm1",
         snapshot="clean",

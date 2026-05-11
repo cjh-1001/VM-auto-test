@@ -128,8 +128,6 @@ def parse_config(data: dict[str, Any]) -> TestConfig:
 
     mode = TestMode(_required_string(data, "mode"))
     baseline_result = data.get("baseline_result")
-    if mode == TestMode.AV and not baseline_result:
-        raise ValueError("AV config requires baseline_result")
 
     sample = _parse_legacy_sample(data.get("sample"))
     samples = _parse_samples(data.get("samples"))

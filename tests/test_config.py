@@ -45,18 +45,19 @@ def test_parse_baseline_config_converts_to_test_case(monkeypatch):
     assert test_case.verify_shell == Shell.POWERSHELL
 
 
-def test_parse_av_config_requires_baseline_result():
-    with pytest.raises(ValueError, match="baseline_result"):
-        parse_config(
-            {
-                "vm_id": "vm1",
-                "snapshot": "av",
-                "mode": "av",
-                "guest": {"user": "Administrator"},
-                "sample": {"command": "sample.exe", "shell": "cmd"},
-                "verification": {"command": "verify", "shell": "powershell"},
-            }
-        )
+def test_parse_av_config_without_baseline_result_succeeds():
+    config = parse_config(
+        {
+            "vm_id": "vm1",
+            "snapshot": "av",
+            "mode": "av",
+            "guest": {"user": "Administrator"},
+            "sample": {"command": "sample.exe", "shell": "cmd"},
+            "verification": {"command": "verify", "shell": "powershell"},
+        }
+    )
+    assert config.mode == TestMode.AV
+    assert config.baseline_result is None
 
 
 def test_resolve_guest_password_prefers_explicit_password(monkeypatch):
