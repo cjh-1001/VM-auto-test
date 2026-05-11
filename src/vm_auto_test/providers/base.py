@@ -57,3 +57,7 @@ class VmwareProvider(ABC):
         progress: Callable[[StepResult], None] | None = None,
     ) -> CommandResult:
         raise NotImplementedError
+
+    @abstractmethod
+    async def capture_screen(self, vm_id: str, output_path: str, credentials: GuestCredentials) -> str:
+        raise NotImplementedError

@@ -336,6 +336,9 @@ class VmrunProvider(VmwareProvider):
                     credentials,
                 )
 
+    async def capture_screen(self, vm_id: str, output_path: str, credentials: GuestCredentials) -> str:
+        return await self._vmrun.capture_screen(vm_id, output_path, user=credentials.user, password=credentials.password)
+
     async def _copy_to_guest(
         self,
         vm_id: str,

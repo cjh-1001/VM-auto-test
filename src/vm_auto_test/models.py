@@ -129,6 +129,7 @@ class TestCase:
     samples: tuple[SampleSpec, ...] = field(default_factory=tuple)
     verification: VerificationSpec | None = None
     av_log_collectors: tuple[AvLogCollectorSpec, ...] = field(default_factory=tuple)
+    capture_screenshot: bool = False
 
     def effective_samples(self) -> tuple[SampleSpec, ...]:
         if self.samples:

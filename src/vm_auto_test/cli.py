@@ -72,6 +72,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Guest password",
     )
     run_parser.add_argument("--baseline-result", help="Required for AV mode")
+    run_parser.add_argument("--capture-screenshot", action="store_true", default=False, help="Capture VM screenshot after verification")
     run_parser.add_argument("--reports-dir", default="reports")
 
     init_parser = subparsers.add_parser("init-config", help="Create a test config interactively")
@@ -91,6 +92,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_dir_parser.add_argument("--guest-user")
     run_dir_parser.add_argument("--guest-password")
     run_dir_parser.add_argument("--baseline-result", help="Required for AV mode")
+    run_dir_parser.add_argument("--capture-screenshot", action="store_true", default=False, help="Capture VM screenshot after verification")
     run_dir_parser.add_argument("--reports-dir", default="reports")
 
     run_csv_parser = subparsers.add_parser("run-csv", help="Run all samples from a CSV table")
@@ -102,6 +104,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_csv_parser.add_argument("--guest-user")
     run_csv_parser.add_argument("--guest-password")
     run_csv_parser.add_argument("--baseline-result", help="Required for AV mode")
+    run_csv_parser.add_argument("--capture-screenshot", action="store_true", default=False, help="Capture VM screenshot after verification")
     run_csv_parser.add_argument("--reports-dir", default="reports")
 
     run_config_parser = subparsers.add_parser("run-config", help="Run validation from a YAML config")
@@ -195,14 +198,14 @@ async def main_async() -> None:
             baseline_result=args.baseline_result,
             samples=sample_specs,
             verification=VerificationSpec(command=verify_command, shell=verify_shell),
+            capture_screenshot=args.capture_screenshot,
         )
+        reset_progress()
         batch_result = await run_dir_orchestrator.run_batch(test_case)
-        print(f"结果: {_classify_cn(batch_result.classification)}  ({batch_result.classification.value})  共 {len(batch_result.samples)} 个样本")
         max_id_width = max((_display_width(s.sample_spec.id) for s in batch_result.samples), default=0)
         for sample_item in batch_result.samples:
             label = _classify_cn(sample_item.classification, short=True)
             print(f"  {_display_ljust(sample_item.sample_spec.id, max_id_width + 2)}  {label}")
-        print(f"  报告: {batch_result.report_dir}")
         return
 
     if args.command == "run-csv":
@@ -255,14 +258,14 @@ async def main_async() -> None:
             baseline_result=args.baseline_result,
             samples=tuple(sample_specs),
             verification=first_verification,
+            capture_screenshot=args.capture_screenshot,
         )
+        reset_progress()
         batch_result = await csv_orchestrator.run_batch(test_case)
-        print(f"结果: {_classify_cn(batch_result.classification)}  ({batch_result.classification.value})  共 {len(batch_result.samples)} 个样本")
         max_id_width = max((_display_width(s.sample_spec.id) for s in batch_result.samples), default=0)
         for sample_item in batch_result.samples:
             label = _classify_cn(sample_item.classification, short=True)
             print(f"  {_display_ljust(sample_item.sample_spec.id, max_id_width + 2)}  {label}")
-        print(f"  报告: {batch_result.report_dir}")
         return
 
     if args.command == "init-config":
@@ -279,19 +282,15 @@ async def main_async() -> None:
         test_case = to_test_case(config, password=args.guest_password)
         config_orchestrator = TestOrchestrator(config_provider, Path(config.reports_dir), progress=print_progress)
         if config.samples:
+            reset_progress()
             batch_result = await config_orchestrator.run_batch(test_case)
-            print(f"结果: {_classify_cn(batch_result.classification)}  ({batch_result.classification.value})  共 {len(batch_result.samples)} 个样本")
             max_id_width = max((_display_width(s.sample_spec.id) for s in batch_result.samples), default=0)
             for sample in batch_result.samples:
                 label = _classify_cn(sample.classification, short=True)
                 print(f"  {_display_ljust(sample.sample_spec.id, max_id_width + 2)}  {label}")
-            print(f"  报告: {batch_result.report_dir}")
             return
+        reset_progress()
         result = await config_orchestrator.run(test_case)
-        print(f"结果: {_classify_cn(result.classification)}")
-        print(f"classification={result.classification.value}")
-        print(f"changed={result.changed}")
-        print(f"report_dir={result.report_dir}")
         return
 
     orchestrator = TestOrchestrator(provider, Path(clean_cli_value(args.reports_dir)), progress=print_progress)
@@ -326,12 +325,10 @@ async def main_async() -> None:
         verify_shell=Shell(args.verify_shell),
         credentials=GuestCredentials(guest_user, guest_password),
         baseline_result=args.baseline_result,
+        capture_screenshot=args.capture_screenshot,
     )
+    reset_progress()
     result = await orchestrator.run(test_case)
-    print(f"结果: {_classify_cn(result.classification)}")
-    print(f"classification={result.classification.value}")
-    print(f"changed={result.changed}")
-    print(f"report_dir={result.report_dir}")
 
 
 async def _interactive_menu(provider: VmwareProvider, env_file: Path) -> None:
@@ -645,11 +642,14 @@ async def _interactive_single(provider: VmwareProvider) -> None:
 
         # — step 6: Confirm —
         if step == 6:
+            capture_screenshot = input("  截取 VM 截图? [y/N]: ").strip().lower() == "y"
             print(f"\n  VM:       {vm_id}")
             print(f"  快照:     {snapshot}")
             print(f"  模式:     {mode.value}")
             print(f"  样本:     [{sample_shell.value}] {sample_command}")
             print(f"  验证:     [{verify_shell.value}] {verify_command}")
+            if capture_screenshot:
+                print(f"  截图:     是")
             if baseline_result:
                 print(f"  baseline: {baseline_result}")
             confirm = input("  确认执行? [y/N]: ").strip().lower()
@@ -666,14 +666,14 @@ async def _interactive_single(provider: VmwareProvider) -> None:
                 verify_command=verify_command, verify_shell=verify_shell,
                 credentials=GuestCredentials(guest_user, guest_password),
                 baseline_result=baseline_result,
+                capture_screenshot=capture_screenshot,
             )
             orch = TestOrchestrator(provider, Path("reports"), progress=print_progress)
             try:
+                reset_progress()
                 result = await orch.run(test_case)
             except VmToolsNotReadyError:
                 return
-            print(f"\n  {_classify_cn(result.classification)}")
-            print(f"  报告: {result.report_dir}")
             return
 
 
@@ -817,6 +817,9 @@ async def _interactive_csv(provider: VmwareProvider) -> None:
             print(f"  模式:     {mode.value}")
             if baseline_result:
                 print(f"  baseline: {baseline_result}")
+            capture_screenshot = input("  截取 VM 截图? [y/N]: ").strip().lower() == "y"
+            if capture_screenshot:
+                print(f"  截图:     是")
             confirm = input("  确认执行? [y/N]: ").strip().lower()
             if confirm == "b":
                 step = 4
@@ -843,18 +846,18 @@ async def _interactive_csv(provider: VmwareProvider) -> None:
                 baseline_result=baseline_result,
                 samples=tuple(sample_specs),
                 verification=first_v or VerificationSpec(command="", shell=Shell.POWERSHELL),
+                capture_screenshot=capture_screenshot,
             )
             orch = TestOrchestrator(provider, Path("reports"), progress=print_progress)
             try:
+                reset_progress()
                 batch_result = await orch.run_batch(test_case)
             except VmToolsNotReadyError:
                 return
-            print(f"\n  {_classify_cn(batch_result.classification)}  ({batch_result.classification.value})  共 {len(batch_result.samples)} 个样本")
             max_id_width = max((_display_width(s.sample_spec.id) for s in batch_result.samples), default=0)
             for s in batch_result.samples:
                 label = _classify_cn(s.classification, short=True)
                 print(f"    {_display_ljust(s.sample_spec.id, max_id_width + 2)}  {label}")
-            print(f"  报告: {batch_result.report_dir}")
             return
 
 
@@ -945,13 +948,55 @@ def _display_ljust(text: str, width: int) -> str:
     return text + " " * max(0, width - _display_width(text))
 
 
+_STEP_LABELS: dict[str, str] = {
+    "create_report_dir": "创建报告目录",
+    "revert_snapshot": "回滚到快照",
+    "start_vm": "开机",
+    "wait_guest_ready": "等待系统就绪",
+    "before_verification": "攻击前环境检查",
+    "run_sample": "执行恶意样本",
+    "after_verification": "攻击后效果验证",
+    "capture_screenshot": "截取 VM 画面",
+    "collect_av_logs": "采集杀软日志",
+    "evaluate": "判定攻击效果",
+    "write_report": "生成测试报告",
+    "write_batch_report": "生成批量报告",
+    "batch_sample": "处理样本",
+    "batch_evaluate": "批量判定",
+}
+
+_SUB_STEPS = {"check_vmware_tools", "guest_process_check", "guest_script"}
+
+_last_stage: str = ""
+
+
+def reset_progress() -> None:
+    global _last_stage
+    _last_stage = ""
+
+
 def print_progress(step: StepResult) -> None:
-    status_col = _display_ljust(f"[{step.status}]", 10)
-    stage_col = _display_ljust(step.stage, 14) if step.stage else " " * 14
-    label = step.name.replace("_", " ")
-    name_col = _display_ljust(label, 24)
+    global _last_stage
+
+    # Skip internal sub-steps to reduce noise
+    if step.name in _SUB_STEPS:
+        return
+
+    # Only show final results, not started events
+    if step.status == "started":
+        return
+
+    # Stage header when stage changes
+    stage = step.stage.strip()
+    if stage and stage != _last_stage:
+        _last_stage = stage
+        print(f"\n  ── {stage} ──")
+
+    label = _STEP_LABELS.get(step.name, step.name.replace("_", " "))
+    icon = "✓" if step.status == "passed" else "✗"
+    label_col = _display_ljust(label, 18)
     detail = step.detail if step.detail else ""
-    print(f"{status_col}{stage_col}{name_col}{detail}", flush=True)
+    print(f"  {icon} {label_col}{detail}", flush=True)
 
 
 async def build_config_interactively(

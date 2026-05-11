@@ -32,6 +32,12 @@ from vm_auto_test.reporting import (
 
 _LOGGER = logging.getLogger(__name__)
 _SAMPLE_ID_PATTERN = re.compile(r"^[^\x00-\x1f/\\]{1,64}$")
+
+
+def _verdict_text(classification: Classification, mode: TestMode, changed: bool) -> str:
+    if mode == TestMode.BASELINE:
+        return "✓ SUCCESS — 攻击生效，样本有效" if changed else "✗ FAILED — 攻击未生效，样本无效"
+    return "✗ FAILED — 杀软未拦截" if changed else "✓ SUCCESS — 杀软已拦截"
 ProgressCallback = Callable[[StepResult], None]
 T = TypeVar("T")
 
@@ -171,22 +177,40 @@ class TestOrchestrator:
         )
         steps.append(StepResult("after_verification", "passed", after.capture_method, self._stage))
 
+        if test_case.capture_screenshot:
+            self._stage = "验证攻击效果"
+            screenshot_path = str(report_dir / "screenshot.png")
+            await self._run_progress_step(
+                "capture_screenshot",
+                "screenshot",
+                lambda: self._provider.capture_screen(
+                    test_case.vm_id,
+                    screenshot_path,
+                    test_case.credentials,
+                ),
+                screenshot_path,
+            )
+            steps.append(StepResult("capture_screenshot", "passed", screenshot_path, self._stage))
+
         self._stage = "验证攻击效果"
-        logs = await self._run_progress_step(
-            "collect_av_logs",
-            str(len(test_case.av_log_collectors)),
-            lambda: collect_av_logs(self._provider, test_case),
-            lambda result: str(len(result)),
-        )
-        if logs:
-            steps.append(StepResult("collect_av_logs", "passed", str(len(logs)), self._stage))
+        if test_case.av_log_collectors:
+            logs = await self._run_progress_step(
+                "collect_av_logs",
+                str(len(test_case.av_log_collectors)),
+                lambda: collect_av_logs(self._provider, test_case),
+                lambda result: str(len(result)),
+            )
+            if logs:
+                steps.append(StepResult("collect_av_logs", "passed", str(len(logs)), self._stage))
+        else:
+            logs = ()
 
         self._stage = "验证攻击效果"
         evaluation, classification = self._run_sync_progress_step(
             "evaluate",
             "comparisons",
             lambda: self._evaluate(before, after, verification, test_case),
-            lambda result: result[1].value,
+            lambda result: _verdict_text(result[1], test_case.mode, result[0].changed),
         )
         steps.append(StepResult("evaluate", "passed", classification.value, self._stage))
 
@@ -306,22 +330,40 @@ class TestOrchestrator:
         )
         steps.append(StepResult("after_verification", "passed", after.capture_method, self._stage))
 
+        if test_case.capture_screenshot:
+            self._stage = "验证攻击效果"
+            screenshot_path = str(report_dir / "screenshot.png")
+            await self._run_progress_step(
+                "capture_screenshot",
+                "screenshot",
+                lambda: self._provider.capture_screen(
+                    test_case.vm_id,
+                    screenshot_path,
+                    test_case.credentials,
+                ),
+                screenshot_path,
+            )
+            steps.append(StepResult("capture_screenshot", "passed", screenshot_path, self._stage))
+
         self._stage = "验证攻击效果"
-        logs = await self._run_progress_step(
-            "collect_av_logs",
-            str(len(test_case.av_log_collectors)),
-            lambda: collect_av_logs(self._provider, test_case),
-            lambda result: str(len(result)),
-        )
-        if logs:
-            steps.append(StepResult("collect_av_logs", "passed", str(len(logs)), self._stage))
+        if test_case.av_log_collectors:
+            logs = await self._run_progress_step(
+                "collect_av_logs",
+                str(len(test_case.av_log_collectors)),
+                lambda: collect_av_logs(self._provider, test_case),
+                lambda result: str(len(result)),
+            )
+            if logs:
+                steps.append(StepResult("collect_av_logs", "passed", str(len(logs)), self._stage))
+        else:
+            logs = ()
 
         self._stage = "验证攻击效果"
         evaluation, classification = self._run_sync_progress_step(
             "evaluate",
             "comparisons",
             lambda: self._evaluate(before, after, verification, test_case),
-            lambda result: result[1].value,
+            lambda result: _verdict_text(result[1], test_case.mode, result[0].changed),
         )
         steps.append(StepResult("evaluate", "passed", classification.value, self._stage))
         return SampleTestResult(

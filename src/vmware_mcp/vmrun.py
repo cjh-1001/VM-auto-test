@@ -224,8 +224,8 @@ class VMRun:
         return await self._run("writeVariable", vmx_path, var_type, name, value, guest_user=user, guest_pass=password)
 
     # === Screen/Input ===
-    async def capture_screen(self, vmx_path: str, output_path: str) -> str:
-        return await self._run("captureScreen", vmx_path, output_path)
+    async def capture_screen(self, vmx_path: str, output_path: str, user: str = "", password: str = "") -> str:
+        return await self._run("captureScreen", vmx_path, output_path, guest_user=user, guest_pass=password)
 
     async def type_keystrokes(self, vmx_path: str, keystrokes: str) -> str:
         return await self._run("typeKeystrokesInGuest", vmx_path, keystrokes)

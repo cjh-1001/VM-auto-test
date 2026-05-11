@@ -256,12 +256,22 @@ def test_choose_value_returns_default_for_empty_selection(monkeypatch):
 
 
 def test_print_progress_outputs_status_line(capsys):
-    print_progress(StepResult("wait_guest_ready", "started", "vm1"))
+    print_progress(StepResult("wait_guest_ready", "passed", "guest tools"))
 
     output = capsys.readouterr().out
-    assert "[started]" in output
-    assert "wait guest ready" in output
-    assert "vm1" in output
+    assert "✓" in output
+    assert "等待系统就绪" in output
+    assert "guest tools" in output
+
+
+def test_print_progress_skips_started_events(capsys):
+    print_progress(StepResult("start_vm", "started", "vm"))
+    assert capsys.readouterr().out == ""
+
+
+def test_print_progress_skips_sub_steps(capsys):
+    print_progress(StepResult("guest_script", "passed", "completed"))
+    assert capsys.readouterr().out == ""
 
 
 def test_format_cli_error_shows_runtime_error_message():
@@ -330,8 +340,6 @@ async def test_run_emits_progress_events(tmp_path):
         ("run_sample", "passed"),
         ("after_verification", "started"),
         ("after_verification", "passed"),
-        ("collect_av_logs", "started"),
-        ("collect_av_logs", "passed"),
         ("evaluate", "started"),
         ("evaluate", "passed"),
         ("write_report", "started"),

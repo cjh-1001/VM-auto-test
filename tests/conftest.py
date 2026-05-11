@@ -52,6 +52,10 @@ class FakeProvider(VmwareProvider):
         self.commands.append(command)
         return CommandResult(command=command, stdout=self._outputs.pop(0))
 
+    async def capture_screen(self, vm_id: str, output_path: str, credentials: GuestCredentials) -> str:
+        self.commands.append(f"capture_screen:{output_path}")
+        return output_path
+
 
 async def run_case(tmp_path, mode: TestMode, before: str, after: str, baseline_result: str | None = None):
     provider = FakeProvider(before=before, after=after)
