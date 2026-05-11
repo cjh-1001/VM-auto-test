@@ -1,59 +1,76 @@
 # VM Auto Test
 
-Use this skill when the user wants to operate or reason about the local `vm-auto-test` project: VMware Workstation lab automation for authorized sample validation and AV blocking checks.
+Use this skill when working on the local `vm-auto-test` project or helping the user operate it. The project automates VMware Workstation lab validation for authorized sample-effect checks and defensive AV blocking comparison.
 
-The project automates this workflow:
+The safe workflow is:
 
 ```text
-revert snapshot -> start VM -> wait for VMware Tools -> run verification before -> run sample -> run verification after -> collect logs -> write report
+revert snapshot -> start VM -> wait for VMware Tools -> verify before -> run sample -> verify after -> collect configured logs -> write report
 ```
 
-It only performs automation and result comparison. Do not use it to generate samples, bypass detection, evade AV/EDR, establish persistence, move laterally, or run tests outside an authorized local lab.
+It only automates execution, observation, comparison, and reporting. Do not use it to generate samples, bypass detection, evade AV/EDR, establish persistence, move laterally, escalate privileges, or run tests outside an authorized local lab.
 
 ## Safety boundary
 
-Before helping the user run a test, confirm the work stays within these boundaries:
+Before helping the user run a real test, confirm these boundaries:
 
 - Authorized local VMware Workstation lab only.
-- Prefer isolated networking such as Host-only or NAT.
-- Always use a known rollback snapshot before executing a sample.
+- Prefer Host-only or NAT networking.
+- Use a known rollback snapshot before executing any sample.
 - Do not run unknown samples on production hosts, shared systems, or non-owned VMs.
-- Do not print, summarize, or expose passwords from `credentials.json`.
-- Do not suggest AV bypass, stealth, obfuscation, anti-analysis, persistence, privilege escalation, or payload generation.
+- Do not print, summarize, or expose passwords from `.env`, YAML files, or `credentials.json`.
+- Do not invent AV bypass, stealth, obfuscation, anti-analysis, persistence, privilege escalation, or payload-generation steps.
 - If the user asks for offensive capability beyond automation and comparison, refuse that part and redirect to safe validation/reporting workflows.
 
-## Preflight checklist
+## Project facts to keep aligned
 
-Before running `vm-auto-test`, check or ask for:
+Check current code before changing this skill. The authoritative files are:
+
+- `src/vm_auto_test/cli.py` — CLI arguments, interactive menu, environment-variable pre-resolution.
+- `src/vm_auto_test/config.py` — YAML/CSV schema, comparison config, sample scanning.
+- `src/vm_auto_test/orchestrator.py` — execution flow and report generation.
+- `README.md` — user-facing setup and workflow documentation.
+- `pyproject.toml` — console script names.
+
+Console scripts:
+
+- `vm-auto-test`
+- `vm-auto-test-smoke`
+- `vmware-mcp`
+
+## Preflight checklist for real VMware runs
+
+Check or ask for:
 
 1. `vmrun.exe` is installed and `VMRUN_PATH` is configured in `.env`.
-2. The target VM is a `.vmx` path or a running VM returned by `vm-auto-test vms`.
+2. The target VM is either a `.vmx` path or a running VM returned by `vm-auto-test vms`.
 3. VMware Tools is installed and ready inside the guest.
-4. VM access control encryption is disabled; encrypted VMs often cause `vmrun` snapshot commands to hang or fail.
-5. A local guest administrator account exists (not a Microsoft online account — `vmrun` guest auth only supports local accounts).
-6. Guest credentials are configured through the interactive menu or available through the configured credential store.
-7. A clean snapshot exists for baseline mode, and an AV-installed snapshot exists for AV mode if needed.
-8. The sample path is the path inside the guest VM, not necessarily the host path.
-9. The verification command observes a real effect of the sample and is safe to run before and after execution.
-10. **All guest commands (sample, verify, env-var expansion) run as the credential user, not the desktop user.** If a sample creates user-specific artifacts (e.g. startup folder LNK, `HKCU` registry keys), they affect the credential user's profile. Verification commands should target that same user's context — `%APPDATA%` and `HKCU` automatically resolve correctly because they run as the credential user.
+4. VM access control encryption is disabled; encrypted VMs often make `vmrun` snapshot commands hang or fail.
+5. A local guest administrator account exists. Avoid Microsoft online accounts because `vmrun` guest auth expects local credentials.
+6. The credential user has logged into the VM desktop at least once so Windows creates that user profile directory.
+7. Guest credentials are configured through the interactive menu or provided through the intended credential mechanism.
+8. A clean snapshot exists for baseline mode; an AV-installed snapshot exists for AV mode when needed.
+9. The sample command resolves to a path that is valid inside the guest VM.
+10. The verification command observes a real, safe effect of the sample before/after execution.
+11. All guest commands run as the configured credential user, not necessarily the currently visible desktop user.
 
 ## Choosing the right command
-
-Use this decision guide:
 
 | User intent | Command |
 |---|---|
 | First-time setup or guided operation | `vm-auto-test` |
+| Configure `VMRUN_PATH` | `vm-auto-test` then menu `[5] 重新配置环境` |
+| Configure/verify VM credentials | `vm-auto-test` then menu `[3] 列出 VM` |
 | List running VMs | `vm-auto-test vms` |
-| List snapshots for a VM | `vm-auto-test snapshots --vm "<vmx path>"` |
-| Test one sample with known parameters | `vm-auto-test run ...` |
-| Test all matching files in a directory | `vm-auto-test run-dir ...` |
-| Test many samples from an Excel/CSV table | `vm-auto-test run-csv ...` |
-| Create a reusable YAML config | `vm-auto-test init-config ...` |
-| Run a reusable YAML config | `vm-auto-test run-config <yaml>` |
-| Check the real VMware path without running a sample suite | `vm-auto-test-smoke` |
+| List snapshots | `vm-auto-test snapshots --vm "<vmx path>"` |
+| Test one known sample | `vm-auto-test run ...` |
+| Batch test from a local directory scan | `vm-auto-test run-dir ...` |
+| Batch test from CSV with per-sample verification | `vm-auto-test run-csv ...` |
+| Create reusable YAML config | `vm-auto-test init-config ...` |
+| Run reusable YAML config | `vm-auto-test run-config <yaml>` |
+| Check real VMware connectivity | `vm-auto-test-smoke` only when explicitly requested |
 
-If the user provides only partial information, prefer the interactive menu (`vm-auto-test`) rather than guessing paths, credentials, snapshots, or verification commands.
+If the user provides partial details, prefer the interactive menu (`vm-auto-test`) rather than guessing paths, credentials, snapshots, or verification commands.
 
 `--env-file` is a top-level argument:
 
@@ -63,15 +80,24 @@ vm-auto-test --env-file .env <command>
 
 ## Common workflows
 
-### 1. First run / interactive mode
-
-Use this when the user wants guidance or has not configured the environment yet:
+### 1. Interactive first run
 
 ```bash
 vm-auto-test
 ```
 
-The menu can configure `VMRUN_PATH`, list VMs, list snapshots, configure guest credentials, and run single-sample or CSV tests.
+Use this for setup, guided single-sample tests, guided CSV tests, VM listing, snapshot listing, and per-VM credential configuration.
+
+The menu currently exposes:
+
+```text
+[0] 退出
+[1] 测试单样本
+[2] 测试多样本 (CSV)
+[3] 列出 VM
+[4] 列出快照
+[5] 重新配置环境
+```
 
 ### 2. Discover VM and snapshots
 
@@ -84,7 +110,7 @@ If snapshot listing times out or fails, first suspect VM encryption/access contr
 
 ### 3. Single-sample baseline test
 
-Use baseline mode on a clean snapshot to prove the sample produces the expected observable effect:
+Use baseline mode on a clean snapshot to prove the sample creates the expected observable effect:
 
 ```bash
 vm-auto-test run \
@@ -98,7 +124,7 @@ vm-auto-test run \
   --reports-dir reports
 ```
 
-Prefer a verification command that observes the sample's actual expected effect. `hostname` is useful as a harmless smoke example, but often not enough to prove a real behavior change.
+`hostname` is a harmless smoke example, but real validations should use a verification command that observes the expected effect.
 
 ### 4. Single-sample AV test
 
@@ -117,11 +143,11 @@ vm-auto-test run \
   --reports-dir reports
 ```
 
-AV mode validates whether the effect still occurs in the AV snapshot. It does not attempt to bypass or tune around detection.
+AV mode checks whether the same observable effect still occurs in the AV snapshot. It does not tune around detection.
 
 ### 5. Directory batch test
 
-Use when all samples in a guest-visible directory share one verification command:
+Use when multiple sample files share one verification command:
 
 ```bash
 vm-auto-test run-dir \
@@ -135,7 +161,9 @@ vm-auto-test run-dir \
   --reports-dir reports
 ```
 
-Default patterns include `*.exe`, `*.bat`, `*.ps1`, and `*.cmd` when `--pattern` is omitted.
+Important: `run-dir` scans `--dir` from the machine running the CLI, then uses each discovered path as the guest sample command. Use it only when those paths are also valid inside the guest, such as a shared or mirrored path. Otherwise use CSV and provide guest paths explicitly.
+
+When `--pattern` is omitted, default patterns are `*.exe`, `*.bat`, `*.ps1`, and `*.cmd`. `.ps1` samples run with PowerShell; others run with `cmd`.
 
 ### 6. CSV batch test
 
@@ -151,22 +179,28 @@ vm-auto-test run-csv \
   --reports-dir reports
 ```
 
-CSV format is UTF-8 or GBK with 3 columns. A header row is optional when the first column starts with `sample`.
+CSV is UTF-8/UTF-8 BOM or GBK with 3 columns. A header row is optional when the first column starts with `sample`.
 
 | sample_file | verify_command | verify_shell |
 |---|---|---|
 | `sample.exe` | `hostname` | `cmd` |
 | `test.bat` | `schtasks /query` | `powershell` |
 
-Relative `sample_file` values require `--samples-base-dir`.
+Relative `sample_file` values require `--samples-base-dir`. CSV sample paths are intended to become guest commands.
 
 ### 7. YAML config workflow
 
-Use YAML configs for repeatable test runs:
+Create and run reusable configs:
 
 ```bash
 vm-auto-test init-config --output configs/baseline.yaml --mode baseline
 vm-auto-test run-config configs/baseline.yaml
+```
+
+`init-config` can accept:
+
+```bash
+vm-auto-test init-config --output configs/batch.yaml --mode baseline --vm "<vmx path>" --samples-dir "C:\Samples"
 ```
 
 For AV configs, include a valid baseline result path:
@@ -202,12 +236,46 @@ provider:
 
 Multi-sample configs use `samples:` instead of `sample:`. Do not include both.
 
+```yaml
+samples:
+  - id: sample-a
+    command: "C:\\Samples\\a.exe"
+    shell: cmd
+    verification:
+      command: "type C:\\marker-a.txt"
+      shell: cmd
+  - id: sample-b
+    command: "C:\\Samples\\b.ps1"
+    shell: powershell
+    verification:
+      command: "Get-Content C:\\marker-b.txt"
+      shell: powershell
+```
+
+## Verification commands and environment variables
+
+All sample, verification, and environment-probe commands run as the credential user.
+
+Interactive single-sample and interactive CSV flows pre-resolve `%VAR%` in verification commands by running `echo %VAR%` as the credential user. If the expanded value contains a `C:\Users\<name>\` profile that is not the credential user and is not a system profile such as `Public` or `Default`, the CLI checks that profile exists and rewrites the path to the credential user. This helps avoid checking the wrong user profile after Microsoft-account or profile-name drift.
+
+Example interactive verification command:
+
+```cmd
+dir "%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\Updater.lnk"
+```
+
+Non-interactive `run`, `run-dir`, `run-csv`, and `run-config` do not perform that CLI pre-resolution step. In those modes:
+
+- `cmd` verification commands can use normal `%APPDATA%` expansion inside the guest.
+- PowerShell verification commands should use PowerShell syntax such as `$env:APPDATA`, or use `--verify-shell cmd` for `%VAR%` syntax.
+- Prefer `%APPDATA%`/`$env:APPDATA` or credential-user-relative logic over hardcoded `C:\Users\<name>\...` paths.
+
 ## Result interpretation
 
 | Classification | Meaning | Next step |
 |---|---|---|
-| `BASELINE_VALID` | The verification output changed in baseline mode. | The sample/effect is valid enough to compare against AV mode. |
-| `BASELINE_INVALID` | The verification output did not change in baseline mode. | Check sample path, guest permissions, timeout, and whether the verification command observes the right effect. |
+| `BASELINE_VALID` | Verification output changed in baseline mode. | The sample/effect is valid enough to compare against AV mode. |
+| `BASELINE_INVALID` | Verification output did not change in baseline mode. | Check sample path, guest permissions, timeout, and whether verification observes the right effect. |
 | `AV_NOT_BLOCKED` | In AV mode, the effect still occurred. | Keep the report for defensive analysis; do not pivot into evasion guidance. |
 | `AV_BLOCKED_OR_NO_CHANGE` | In AV mode, no effect was observed. | Check report files and configured AV logs to distinguish blocking from sample failure. |
 
@@ -228,15 +296,15 @@ Batch reports include per-sample result directories under the batch report direc
 
 Default behavior is `changed`: compare normalized before/after output.
 
-YAML `verification.comparisons` can use:
+YAML `verification.comparisons` and per-sample `verification.comparisons` can use:
 
-| Type | Use |
-|---|---|
-| `changed` | Before/after output differs after normalization. |
-| `contains` | Output contains `value`. |
-| `regex` | Output matches `pattern`. |
-| `json_field` | JSON field at `path` equals `expected`. |
-| `file_hash` | Output hash equals `expected`. |
+| Type | Required field | Use |
+|---|---|---|
+| `changed` | none | Before/after output differs after normalization. |
+| `contains` | `value` | Output contains a string. |
+| `regex` | `pattern` | Output matches a regex. |
+| `json_field` | `path`, `expected` | JSON field at dot path equals expected value. |
+| `file_hash` | `expected` | Output SHA-256 equals expected value. |
 
 Example:
 
@@ -271,10 +339,12 @@ Do not invent vendor-specific collectors unless the user provides the exact safe
 |---|---|---|
 | Snapshot listing fails or times out | VM access control encryption or wrong `.vmx` path | Ask user to disable encryption and verify the VM path. |
 | `VmToolsNotReadyError` | VMware Tools missing, stopped, or guest not booted | Ask user to install/restart VMware Tools and retry. |
-| Guest authentication fails repeatedly | Wrong local credentials or Microsoft online account | Use a local administrator account and reconfigure credentials through the menu. |
-| AV mode says missing baseline | `--baseline-result` absent or not `BASELINE_VALID` | Run baseline first and pass its `result.json`. |
-| CSV parse error | Encoding or column mismatch | Save as CSV UTF-8/GBK with 3 columns. |
-| `BASELINE_INVALID` | Verification command does not observe the effect, or user-specific path mismatch | Choose a better verification command; or verify the path targets the credential user, not a different user or the desktop user. Use `%APPDATA%` instead of hardcoded `C:\Users\<name>\` paths. |
+| Repeated guest auth failures | Wrong local credentials, Microsoft online account, or user profile not initialized | Use a local administrator account, log in once, and reconfigure credentials. |
+| AV mode says missing baseline | `--baseline-result` absent or not from a `BASELINE_VALID` run | Run baseline first and pass its `result.json`. |
+| CSV parse error | Encoding, missing columns, relative sample without base dir, or invalid shell | Save as UTF-8/GBK CSV with `sample_file,verify_command,verify_shell`; set `--samples-base-dir` for relative paths. |
+| `BASELINE_INVALID` | Verification command does not observe the effect, wrong user profile, sample path invalid, or insufficient guest permissions | Choose a better verification command and ensure it targets the credential user's context. |
+| PowerShell verification with `%APPDATA%` fails in non-interactive CLI | `%VAR%` is cmd syntax and non-interactive CLI does not pre-resolve it | Use `$env:APPDATA` with PowerShell or run the verification with `cmd`. |
+| `run-dir` finds files but guest execution fails | Host-scanned paths are not valid inside the guest | Use shared/mirrored paths or switch to CSV with explicit guest paths. |
 
 ## Development checks
 
@@ -285,6 +355,11 @@ pytest
 python -m compileall -q src tests
 ```
 
-The test suite uses fake providers and does not require a real VMware environment. `vm-auto-test-smoke` is the real VMware smoke test and should only be run when the user explicitly wants to touch the local VMware setup.
+The test suite uses fake providers and does not require a real VMware environment. `vm-auto-test-smoke` touches the real VMware setup and should only be run when the user explicitly asks for a real VMware smoke test.
 
-When modifying only this skill document, Python tests are usually unnecessary; review that commands match `src/vm_auto_test/cli.py`, the safety boundary is intact, and no credentials or sensitive paths are exposed.
+When modifying only this skill document, Python tests are usually unnecessary. Instead verify:
+
+- Commands and arguments match `src/vm_auto_test/cli.py`.
+- YAML examples match `src/vm_auto_test/config.py`.
+- The safety boundary remains intact.
+- No real credentials, passwords, private samples, or sensitive local paths are exposed.

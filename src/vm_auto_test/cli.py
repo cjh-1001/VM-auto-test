@@ -546,7 +546,7 @@ async def _interactive_single(provider: VmwareProvider) -> None:
                 print("\n  —— 输入 VM 路径 ——")
                 result = _prompt_back("VM 路径")
                 if result is None:
-                    continue
+                    return
                 vm_id = clean_cli_value(result)
             step = 1
             continue
@@ -704,7 +704,7 @@ async def _interactive_csv(provider: VmwareProvider) -> None:
                 print("\n  —— 输入 VM 路径 ——")
                 result = _prompt_back("VM 路径")
                 if result is None:
-                    continue
+                    return
                 vm_id = clean_cli_value(result)
             step = 1
             continue
@@ -1085,12 +1085,12 @@ async def _resolve_env_vars_in_command(
     command: str,
     credentials: "GuestCredentials",
 ) -> str:
-    """Detect %VAR% in command and expand via echo on guest VM."""
+    """Detect %VAR% in command, expand, then swap any non-credential username to the credential user."""
     var_names = _ENV_VAR_RE.findall(command)
     if not var_names:
         return command
 
-    # Expand each env var via echo (runs as auth user in guest)
+    # Expand each env var via echo (runs as credential user in guest)
     expanded = command
     for var_name in var_names:
         try:
@@ -1105,6 +1105,37 @@ async def _resolve_env_vars_in_command(
             expanded = expanded.replace(f"%{var_name}%", value)
         except Exception:
             continue
+
+    if expanded == command:
+        return command
+
+    # Swap any C:\Users\<name>\ that is not the credential user
+    auth_user = credentials.user
+    _SYSTEM_USERS = {"public", "default", "all users"}
+    for m in re.finditer(r"C:\\Users\\([^\\]+)\\?", expanded):
+        found_user = m.group(1)
+        if found_user.lower() == auth_user.lower():
+            break
+        if found_user.lower() in _SYSTEM_USERS:
+            break
+        # Verify it's a real user profile directory before swapping
+        try:
+            check = await provider.run_guest_command(
+                vm_id,
+                f'if exist "C:\\Users\\{found_user}\\" (echo Y) else (echo N)',
+                Shell.CMD,
+                credentials,
+                timeout_seconds=10,
+            )
+            if "Y" not in check.stdout:
+                break
+        except Exception:
+            break
+        expanded = expanded.replace(
+            f"C:\\Users\\{found_user}\\",
+            f"C:\\Users\\{auth_user}\\",
+        )
+        break
 
     return expanded
 
