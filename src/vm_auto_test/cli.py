@@ -3,10 +3,15 @@ from __future__ import annotations
 import argparse
 import asyncio
 import getpass
+import html
+import json
 import os
 import re
 import sys
+from dataclasses import dataclass
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
+from typing import Sequence
 
 from vm_auto_test.config import (
     CommandConfig,
@@ -53,18 +58,32 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--env-file", help="Load environment variables from a .env file before running")
     subparsers = parser.add_subparsers(dest="command")
 
+    config_parser = subparsers.add_parser("config", help="Manage and validate config files")
+    config_subparsers = config_parser.add_subparsers(dest="config_command")
+    validate_parser = config_subparsers.add_parser("validate", help="Validate a YAML config file")
+    validate_parser.add_argument("--config", required=True, help="YAML config file to validate")
+
+    report_parser = subparsers.add_parser("report", help="Generate a standalone report from JSON results")
+    report_parser.add_argument("--input", required=True, help="Input result JSON file")
+    report_parser.add_argument("--output", required=True, help="Output report file")
+    report_parser.add_argument("--format", choices=("html", "json"), default="html")
+
+    doctor_parser = subparsers.add_parser("doctor", help="Check local CLI environment")
+    doctor_parser.add_argument("--config", help="Optional YAML config file to validate")
+    doctor_parser.add_argument("--reports-dir", default="reports", help="Directory to check for report write access")
+
     subparsers.add_parser("vms", help="List running VMs")
 
     snapshot_parser = subparsers.add_parser("snapshots", help="List snapshots for a VM")
     snapshot_parser.add_argument("--vm", required=True, nargs="+", help="VM ID or .vmx path (spaces ok)")
 
     run_parser = subparsers.add_parser("run", help="Run baseline or AV validation")
-    run_parser.add_argument("--vm", required=True, help="VM ID or .vmx path")
-    run_parser.add_argument("--mode", choices=[mode.value for mode in TestMode], required=True)
+    run_parser.add_argument("--vm", help="VM ID or .vmx path")
+    run_parser.add_argument("--mode", choices=[mode.value for mode in TestMode])
     run_parser.add_argument("--snapshot", help="Snapshot name. If omitted, choose interactively.")
-    run_parser.add_argument("--sample-command", required=True, help="Guest command that runs the sample")
+    run_parser.add_argument("--sample-command", help="Guest command that runs the sample")
     run_parser.add_argument("--sample-shell", choices=[shell.value for shell in Shell], default=Shell.CMD.value)
-    run_parser.add_argument("--verify-command", required=True, help="Guest command that verifies effect")
+    run_parser.add_argument("--verify-command", help="Guest command that verifies effect")
     run_parser.add_argument("--verify-shell", choices=[shell.value for shell in Shell], default=Shell.POWERSHELL.value)
     run_parser.add_argument("--guest-user")
     run_parser.add_argument(
@@ -74,6 +93,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--baseline-result", help="Optional baseline report path for reference")
     run_parser.add_argument("--capture-screenshot", action="store_true", default=False, help="Capture VM screenshot after verification")
     run_parser.add_argument("--reports-dir", default="reports")
+    run_parser.add_argument("--config", help="YAML config file. When set, run uses config-driven execution.")
 
     init_parser = subparsers.add_parser("init-config", help="Create a test config interactively")
     init_parser.add_argument("--output", default="configs/sample.yaml", help="Config file to write")
@@ -113,10 +133,34 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-async def main_async() -> None:
+async def main_async(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     load_optional_env_file(Path(clean_cli_value(args.env_file)) if args.env_file else None)
+
+    if args.command == "config":
+        if args.config_command == "validate":
+            config_path = Path(clean_cli_value(args.config))
+            load_config(config_path)
+            print(f"Config is valid: {config_path}")
+            return 0
+        parser.error("config requires a subcommand")
+
+    if args.command == "report":
+        _generate_report_from_json(
+            Path(clean_cli_value(args.input)),
+            Path(clean_cli_value(args.output)),
+            args.format,
+        )
+        print(f"Report written to: {clean_cli_value(args.output)}")
+        return 0
+
+    if args.command == "doctor":
+        return _run_doctor(
+            Path(clean_cli_value(args.config)) if args.config else None,
+            Path(clean_cli_value(args.reports_dir)),
+        )
+
     provider = create_provider("vmrun")
 
     if args.command is None:
@@ -124,17 +168,17 @@ async def main_async() -> None:
         if not is_env_configured():
             await _interactive_setup(env_path)
         await _interactive_menu(provider, env_path)
-        return
+        return 0
 
     if args.command == "vms":
         print("  正在查询运行中的 VM ...", flush=True)
         running_vms = await provider.list_running_vms()
         if not running_vms:
             print("  没有运行中的 VM")
-            return
+            return 0
         for index, vm_id in enumerate(running_vms, start=1):
             print(f"[{index}] {vm_id}")
-        return
+        return 0
 
     if args.command == "snapshots":
         vm_path = " ".join(args.vm) if isinstance(args.vm, list) else args.vm
@@ -145,13 +189,13 @@ async def main_async() -> None:
             snapshots = await orchestrator.list_snapshots(vm_path)
         except RuntimeError as exc:
             print(f"  {exc}")
-            return
+            return 0
         if not snapshots:
             print("  没有找到快照，请先在 VMware Workstation 中为该 VM 创建快照")
-            return
+            return 0
         for index, snapshot in enumerate(snapshots, start=1):
             print(f"  [{index}] {snapshot}")
-        return
+        return 0
 
     if args.command == "run-dir":
         sample_dir = Path(clean_cli_value(args.dir))
@@ -168,7 +212,7 @@ async def main_async() -> None:
             snapshot = choose_from_list(snapshots_list, "选择快照")
             if snapshot is None:
                 print("已取消")
-                return
+                return 0
 
         creds = resolve_guest_credentials(vm_id)
         if creds:
@@ -206,7 +250,8 @@ async def main_async() -> None:
         for sample_item in batch_result.samples:
             label = _classify_cn(sample_item.classification, short=True)
             print(f"  {_display_ljust(sample_item.sample_spec.id, max_id_width + 2)}  {label}")
-        return
+        _print_batch_report_paths(batch_result.report_dir)
+        return 0
 
     if args.command == "run-csv":
         csv_path = Path(clean_cli_value(args.csv))
@@ -223,7 +268,7 @@ async def main_async() -> None:
             snapshot = choose_from_list(snapshots_list, "选择快照")
             if snapshot is None:
                 print("已取消")
-                return
+                return 0
 
         creds = resolve_guest_credentials(vm_id)
         if creds:
@@ -266,7 +311,8 @@ async def main_async() -> None:
         for sample_item in batch_result.samples:
             label = _classify_cn(sample_item.classification, short=True)
             print(f"  {_display_ljust(sample_item.sample_spec.id, max_id_width + 2)}  {label}")
-        return
+        _print_batch_report_paths(batch_result.report_dir)
+        return 0
 
     if args.command == "init-config":
         samples_dir_value = clean_cli_value(args.samples_dir) if args.samples_dir else None
@@ -274,12 +320,15 @@ async def main_async() -> None:
         output = Path(clean_cli_value(args.output))
         write_config(output, config)
         print(f"config={output}")
-        return
+        return 0
 
-    if args.command == "run-config":
-        config = load_config(Path(clean_cli_value(args.config)))
+    if args.command == "run-config" or (args.command == "run" and args.config):
+        if args.command == "run":
+            _validate_run_config_args(parser, args)
+        config_path = Path(clean_cli_value(args.config))
+        config = load_config(config_path)
         config_provider = create_provider(config.provider.type)
-        test_case = to_test_case(config, password=args.guest_password)
+        test_case = to_test_case(config, password=getattr(args, "guest_password", None))
         config_orchestrator = TestOrchestrator(config_provider, Path(config.reports_dir), progress=print_progress)
         if config.samples:
             reset_progress()
@@ -288,10 +337,14 @@ async def main_async() -> None:
             for sample in batch_result.samples:
                 label = _classify_cn(sample.classification, short=True)
                 print(f"  {_display_ljust(sample.sample_spec.id, max_id_width + 2)}  {label}")
-            return
+            _print_batch_report_paths(batch_result.report_dir)
+            return 0
         reset_progress()
-        result = await config_orchestrator.run(test_case)
-        return
+        await config_orchestrator.run(test_case)
+        return 0
+
+    if args.command == "run":
+        _validate_run_args(parser, args)
 
     orchestrator = TestOrchestrator(provider, Path(clean_cli_value(args.reports_dir)), progress=print_progress)
     vm_id = clean_cli_value(args.vm)
@@ -303,7 +356,7 @@ async def main_async() -> None:
         snapshot = choose_from_list(snapshots, "选择快照")
         if snapshot is None:
             print("已取消")
-            return
+            return 0
 
     creds = resolve_guest_credentials(vm_id)
     if creds:
@@ -328,7 +381,143 @@ async def main_async() -> None:
         capture_screenshot=args.capture_screenshot,
     )
     reset_progress()
-    result = await orchestrator.run(test_case)
+    await orchestrator.run(test_case)
+    return 0
+
+
+def _generate_report_from_json(input_path: Path, output_path: Path, output_format: str) -> None:
+    data = json.loads(input_path.read_text(encoding="utf-8-sig"))
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if output_format == "json":
+        output_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        return
+    output_path.write_text(_standalone_html_report(data), encoding="utf-8")
+
+
+def _standalone_html_report(data: object) -> str:
+    title = "VM Auto Test Report"
+    body = html.escape(json.dumps(data, ensure_ascii=False, indent=2))
+    return (
+        "<!doctype html>\n"
+        "<html lang=\"zh-CN\">\n"
+        "<head><meta charset=\"utf-8\"><title>VM Auto Test Report</title></head>\n"
+        "<body>\n"
+        f"<h1>{title}</h1>\n"
+        f"<pre>{body}</pre>\n"
+        "</body>\n"
+        "</html>\n"
+    )
+
+
+@dataclass(frozen=True)
+class DoctorCheck:
+    label: str
+    status: str
+    detail: str
+
+
+_DOCTOR_FAIL = "FAIL"
+_DOCTOR_OK = "OK"
+_DOCTOR_WARN = "WARN"
+
+
+def _run_doctor(config_path: Path | None, reports_dir: Path) -> int:
+    checks = [
+        _check_python_version(),
+        _check_package_version(),
+        _check_vmrun_path(),
+    ]
+    if config_path is not None:
+        checks.append(_check_config_file(config_path))
+    checks.append(_check_reports_dir(reports_dir))
+
+    print("VM Auto Test Doctor")
+    print()
+    for check in checks:
+        print(f"[{check.status}] {check.label}: {check.detail}")
+    return 3 if any(check.status == _DOCTOR_FAIL for check in checks) else 0
+
+
+def _check_python_version() -> DoctorCheck:
+    current = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
+    required = sys.version_info >= (3, 10)
+    status = _DOCTOR_OK if required else _DOCTOR_FAIL
+    return DoctorCheck("Python", status, current)
+
+
+def _check_package_version() -> DoctorCheck:
+    try:
+        package_version = version("vm-auto-test")
+    except PackageNotFoundError:
+        return DoctorCheck("Package", _DOCTOR_WARN, "vm-auto-test is importable but not installed as package")
+    return DoctorCheck("Package", _DOCTOR_OK, package_version)
+
+
+def _check_vmrun_path() -> DoctorCheck:
+    value = os.getenv("VMRUN_PATH")
+    if not value:
+        return DoctorCheck("VMRUN_PATH", _DOCTOR_FAIL, "not configured")
+    path = Path(clean_cli_value(value))
+    if not path.is_file():
+        return DoctorCheck("VMRUN_PATH", _DOCTOR_FAIL, f"not found: {path}")
+    return DoctorCheck("VMRUN_PATH", _DOCTOR_OK, str(path))
+
+
+def _check_config_file(config_path: Path) -> DoctorCheck:
+    try:
+        load_config(config_path)
+    except Exception as exc:
+        return DoctorCheck("Config", _DOCTOR_FAIL, f"invalid: {type(exc).__name__}")
+    return DoctorCheck("Config", _DOCTOR_OK, str(config_path))
+
+
+def _check_reports_dir(reports_dir: Path) -> DoctorCheck:
+    try:
+        reports_dir.mkdir(parents=True, exist_ok=True)
+        probe_path = reports_dir / ".vm-auto-test-write-check"
+        probe_path.write_text("ok", encoding="utf-8")
+        probe_path.unlink()
+    except OSError as exc:
+        return DoctorCheck("Reports directory", _DOCTOR_FAIL, f"not writable: {type(exc).__name__}")
+    return DoctorCheck("Reports directory", _DOCTOR_OK, str(reports_dir))
+
+
+def _validate_run_config_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    mixed_options = [
+        option
+        for option, value, default in (
+            ("--vm", args.vm, None),
+            ("--mode", args.mode, None),
+            ("--snapshot", args.snapshot, None),
+            ("--sample-command", args.sample_command, None),
+            ("--sample-shell", args.sample_shell, Shell.CMD.value),
+            ("--verify-command", args.verify_command, None),
+            ("--verify-shell", args.verify_shell, Shell.POWERSHELL.value),
+            ("--guest-user", args.guest_user, None),
+            ("--guest-password", args.guest_password, None),
+            ("--baseline-result", args.baseline_result, None),
+            ("--capture-screenshot", args.capture_screenshot, False),
+            ("--reports-dir", args.reports_dir, "reports"),
+        )
+        if value != default
+    ]
+    if mixed_options:
+        parser.error("run cannot combine --config with " + ", ".join(mixed_options))
+
+
+def _validate_run_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    missing = [
+        option
+        for option, value in (
+            ("--vm", args.vm),
+            ("--mode", args.mode),
+            ("--sample-command", args.sample_command),
+            ("--verify-command", args.verify_command),
+        )
+        if value is None
+    ]
+    if missing:
+        parser.error("run requires --config or " + ", ".join(missing))
 
 
 async def _interactive_menu(provider: VmwareProvider, env_file: Path) -> None:
@@ -742,6 +931,12 @@ async def _interactive_csv(provider: VmwareProvider) -> None:
                 step = 2
                 continue
             csv_path = Path(clean_cli_value(result))
+            if not result or not csv_path.name:
+                print("  CSV 文件路径不能为空")
+                continue
+            if not csv_path.is_file():
+                print(f"  文件不存在: {csv_path}")
+                continue
             result = _prompt_back("VM 上样本目录 (绝对路径则留空)")
             if result is None:
                 step = 2
@@ -834,6 +1029,7 @@ async def _interactive_csv(provider: VmwareProvider) -> None:
             for s in batch_result.samples:
                 label = _classify_cn(s.classification, short=True)
                 print(f"    {_display_ljust(s.sample_spec.id, max_id_width + 2)}  {label}")
+            _print_batch_report_paths(batch_result.report_dir, indent="    ")
             return
 
 
@@ -894,6 +1090,12 @@ def _strip_quotes_env(value: str) -> str:
     if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
         return value[1:-1]
     return value
+
+
+def _print_batch_report_paths(report_dir: str, indent: str = "  ") -> None:
+    print(f"\n{indent}报告文件:")
+    print(f"{indent}  HTML: {report_dir}/result.html")
+    print(f"{indent}  CSV:  {report_dir}/result.csv")
 
 
 def _classify_cn(classification: Any, short: bool = False) -> str:
@@ -1097,7 +1299,15 @@ def choose_value(label: str, values: list[str], default: str | None = None) -> s
 
 
 def format_cli_error(exc: Exception) -> str:
-    if isinstance(exc, (ValueError, IndexError, NotImplementedError)):
+    if isinstance(exc, argparse.ArgumentError):
+        return str(exc)
+    if isinstance(exc, json.JSONDecodeError):
+        return f"Report error: invalid JSON input: {exc}"
+    if isinstance(exc, ValueError):
+        return f"Config error: {exc}"
+    if isinstance(exc, FileNotFoundError):
+        return f"File not found: {exc.filename}"
+    if isinstance(exc, (IndexError, NotImplementedError)):
         return str(exc)
     if isinstance(exc, (VmToolsNotReadyError, RuntimeError)):
         return str(exc)
@@ -1165,13 +1375,15 @@ async def _resolve_env_vars_in_command(
     return expanded
 
 
-def main() -> None:
+def main(argv: Sequence[str] | None = None) -> int:
     try:
-        asyncio.run(main_async())
+        return asyncio.run(main_async(argv))
+    except SystemExit:
+        raise
     except Exception as exc:
         print(format_cli_error(exc), file=sys.stderr)
         raise SystemExit(2) from exc
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

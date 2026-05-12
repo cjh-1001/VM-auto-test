@@ -496,6 +496,9 @@ def parse_csv_samples(
     import csv
     import io
 
+    if not csv_path.is_file():
+        raise ValueError(f"CSV file not found or not a regular file: {csv_path}")
+
     raw = csv_path.read_bytes()
     text = _decode_csv_bytes(raw)
 

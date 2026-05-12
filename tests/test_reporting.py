@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import io
 import json
 
 from vm_auto_test.models import (
@@ -108,7 +109,7 @@ def test_write_batch_report_creates_csv_and_html(tmp_path):
     assert rows[0]["classification"] == "BASELINE_VALID"
     assert rows[0]["report_dir"] == "samples/one"
     html = html_path.read_text(encoding="utf-8")
-    assert "VM Auto Test Batch Report" in html
+    assert "VM Auto Test — 批量测试报告" in html
     assert "result.csv" in html
     assert "samples/one/result.json" in html
 
@@ -141,6 +142,103 @@ def test_batch_csv_neutralizes_excel_formula_cells(tmp_path):
 
     rows = list(csv.DictReader((tmp_path / "result.csv").read_text(encoding="utf-8-sig").splitlines()))
     assert rows[0]["sample_command"] == "'=calc.exe"
+
+
+def test_batch_csv_neutralizes_excel_formula_cells_after_whitespace(tmp_path):
+    test_case = TestCase(
+        vm_id="vm1",
+        snapshot="clean",
+        mode=TestMode.BASELINE,
+        sample_command="sample.exe",
+        verify_command="verify",
+        credentials=GuestCredentials("user", "pass"),
+    )
+    report = BatchTestResult(
+        test_case=test_case,
+        report_dir=str(tmp_path),
+        samples=(
+            make_sample_result(
+                tmp_path,
+                "formula",
+                Classification.BASELINE_VALID,
+                test_case=test_case,
+                sample_spec=SampleSpec(id="formula", command=" \n=calc.exe"),
+            ),
+        ),
+        classification=Classification.BASELINE_VALID,
+    )
+
+    write_batch_report(report)
+
+    rows = list(csv.DictReader(io.StringIO((tmp_path / "result.csv").read_text(encoding="utf-8-sig"))))
+    assert rows[0]["sample_command"] == "' \n=calc.exe"
+
+
+def test_batch_csv_neutralizes_excel_formula_cells_after_zero_width_prefix(tmp_path):
+    test_case = TestCase(
+        vm_id="vm1",
+        snapshot="clean",
+        mode=TestMode.BASELINE,
+        sample_command="sample.exe",
+        verify_command="verify",
+        credentials=GuestCredentials("user", "pass"),
+    )
+    report = BatchTestResult(
+        test_case=test_case,
+        report_dir=str(tmp_path),
+        samples=(
+            make_sample_result(
+                tmp_path,
+                "formula",
+                Classification.BASELINE_VALID,
+                test_case=test_case,
+                sample_spec=SampleSpec(id="formula", command="​=calc.exe"),
+            ),
+        ),
+        classification=Classification.BASELINE_VALID,
+    )
+
+    write_batch_report(report)
+
+    rows = list(csv.DictReader((tmp_path / "result.csv").read_text(encoding="utf-8-sig").splitlines()))
+    assert rows[0]["sample_command"] == "'​=calc.exe"
+
+
+def test_batch_report_rejects_sample_report_dir_outside_batch_root(tmp_path):
+    test_case = TestCase(
+        vm_id="vm1",
+        snapshot="clean",
+        mode=TestMode.BASELINE,
+        sample_command="sample.exe",
+        verify_command="verify",
+        credentials=GuestCredentials("user", "pass"),
+    )
+    sample = make_sample_result(tmp_path, "outside", Classification.BASELINE_VALID, test_case=test_case)
+    sample = SampleTestResult(
+        test_case=sample.test_case,
+        sample_spec=sample.sample_spec,
+        report_dir=str(tmp_path.parent / "outside"),
+        before=sample.before,
+        sample=sample.sample,
+        after=sample.after,
+        evaluation=sample.evaluation,
+        classification=sample.classification,
+        steps=sample.steps,
+        logs=sample.logs,
+    )
+    report = BatchTestResult(
+        test_case=test_case,
+        report_dir=str(tmp_path),
+        samples=(sample,),
+        classification=Classification.BASELINE_VALID,
+    )
+
+    try:
+        write_batch_report(report)
+    except ValueError as error:
+        assert "inside batch report directory" in str(error)
+    else:
+        raise AssertionError("Expected ValueError for sample report dir outside batch root")
 
 
 def test_batch_html_escapes_dynamic_values(tmp_path):
