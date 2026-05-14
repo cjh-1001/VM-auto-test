@@ -492,6 +492,61 @@ def _write_batch_html(result: BatchTestResult, report_dir: Path) -> None:
       .topbar-left h1{{font-size:1.05rem}}
       .footer{{flex-direction:column;align-items:flex-start}}
     }}
+
+    /* ── Drawer ── */
+    .drawer-overlay{{
+      position:fixed;inset:0;background:rgba(15,23,42,0.45);
+      z-index:1000;opacity:0;visibility:hidden;transition:opacity .25s ease,visibility .25s ease
+    }}
+    .drawer-overlay.open{{opacity:1;visibility:visible}}
+    .drawer{{
+      position:fixed;top:0;right:0;width:440px;max-width:100vw;height:100vh;
+      background:#fff;z-index:1001;box-shadow:-4px 0 24px rgba(0,0,0,0.12);
+      display:flex;flex-direction:column;
+      transform:translateX(100%);transition:transform .28s cubic-bezier(0.16,1,0.3,1)
+    }}
+    .drawer.open{{transform:translateX(0)}}
+    .drawer-header{{
+      display:flex;align-items:center;justify-content:space-between;
+      padding:1rem 1.25rem;border-bottom:1px solid #e2e8f0;
+      background:#f8fafc;flex-shrink:0
+    }}
+    .drawer-header .drawer-title{{
+      font-size:0.82rem;font-weight:600;color:#1e293b;
+      font-family:"Cascadia Code","Fira Code",ui-monospace,monospace;
+      overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;margin-right:0.75rem
+    }}
+    .drawer-close{{
+      width:28px;height:28px;border:none;border-radius:6px;
+      background:transparent;color:#64748b;cursor:pointer;font-size:1.1rem;
+      display:flex;align-items:center;justify-content:center;flex-shrink:0;
+      transition:all .12s;line-height:1
+    }}
+    .drawer-close:hover{{background:#fee2e2;color:#b91c1c}}
+    .drawer-body{{
+      flex:1;overflow-y:auto;padding:1rem 1.25rem
+    }}
+    .drawer-body pre{{
+      font-family:"Cascadia Code","Fira Code",ui-monospace,monospace;
+      font-size:0.76rem;line-height:1.55;white-space:pre-wrap;word-break:break-all;
+      color:#334155;margin:0
+    }}
+    .drawer-body img{{
+      max-width:100%;height:auto;border-radius:6px;box-shadow:0 1px 4px rgba(0,0,0,0.08)
+    }}
+    .drawer-loading{{
+      display:flex;align-items:center;justify-content:center;height:100%;color:#94a3b8
+    }}
+    .drawer-loading .spinner{{
+      width:28px;height:28px;border:2.5px solid #e2e8f0;border-top-color:#3b82f6;
+      border-radius:50%;animation:spin .7s linear infinite;margin-right:0.6rem
+    }}
+    @keyframes spin{{to{{transform:rotate(360deg)}}}}
+    .drawer-error{{color:#b91c1c;text-align:center;padding:2rem 1rem;font-size:0.82rem}}
+
+    @media(max-width:640px){{
+      .drawer{{width:100vw}}
+    }}
   </style>
 </head>
 <body>
@@ -604,6 +659,16 @@ def _write_batch_html(result: BatchTestResult, report_dir: Path) -> None:
     </div>
   </div>
 
+  <!-- ═══ Drawer ═══ -->
+  <div class="drawer-overlay" id="drawerOverlay"></div>
+  <div class="drawer" id="drawer">
+    <div class="drawer-header">
+      <span class="drawer-title" id="drawerTitle">—</span>
+      <button class="drawer-close" id="drawerClose" title="关闭">&times;</button>
+    </div>
+    <div class="drawer-body" id="drawerBody"></div>
+  </div>
+
   <script>
     // ── Table sorting ──
     (function(){{
@@ -649,6 +714,50 @@ def _write_batch_html(result: BatchTestResult, report_dir: Path) -> None:
         }}).catch(function(){{}});
       }});
     }});
+
+    // ── Drawer ──
+    (function(){{
+      var overlay=document.getElementById('drawerOverlay');
+      var drawer=document.getElementById('drawer');
+      var titleEl=document.getElementById('drawerTitle');
+      var bodyEl=document.getElementById('drawerBody');
+      var closeBtn=document.getElementById('drawerClose');
+      var openHref=null;
+      function open(href,label){{
+        if(openHref===href)return;
+        openHref=href;
+        titleEl.textContent=label;
+        bodyEl.innerHTML='<div class="drawer-loading"><span class="spinner"></span>加载中…</div>';
+        overlay.classList.add('open');
+        drawer.classList.add('open');
+        var h=_esc(href);
+        var l=_esc(label);
+        if(/\\.(png|jpg|jpeg|gif|webp|svg|bmp|ico)$/i.test(href)){{
+          bodyEl.innerHTML='<img src="'+h+'" alt="'+l+'" />';
+        }}else{{
+          bodyEl.innerHTML='<iframe src="'+h+'" style="width:100%;height:100%;border:none;background:#fff"></iframe>';
+        }}
+      }}
+
+      function close(){{
+        overlay.classList.remove('open');
+        drawer.classList.remove('open');
+        openHref=null;
+      }}
+
+      function _esc(s){{return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}}
+
+      document.querySelectorAll('.artifact-links a').forEach(function(a){{
+        a.addEventListener('click',function(e){{
+          e.preventDefault();
+          open(this.getAttribute('href'),this.textContent.trim());
+        }});
+      }});
+
+      overlay.addEventListener('click',close);
+      closeBtn.addEventListener('click',close);
+      document.addEventListener('keydown',function(e){{if(e.key==='Escape')close();}});
+    }})();
   </script>
 </body>
 </html>
