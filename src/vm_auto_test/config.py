@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import getpass
+import logging
 import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, cast
+
+_LOGGER = logging.getLogger(__name__)
+_PACKAGE_DIR = Path(__file__).resolve().parent
 
 from vm_auto_test.models import (
     AvLogCollectorSpec,
@@ -20,6 +24,7 @@ from vm_auto_test.models import (
 )
 
 DEFAULT_PASSWORD_ENV = "VMWARE_GUEST_PASSWORD"
+DEFAULT_IGNORE_PATTERNS_FILE = "configs/ignore_patterns.txt"
 _SAMPLE_ID_PATTERN = re.compile(r"^[^\x00-\x1f/\\]{1,64}$")
 
 
@@ -85,6 +90,8 @@ class TimeoutConfig:
 class NormalizeConfig:
     trim: bool = True
     ignore_empty_lines: bool = True
+    ignore_patterns: tuple[str, ...] = field(default_factory=tuple)
+    ignore_patterns_file: str | None = DEFAULT_IGNORE_PATTERNS_FILE
 
 
 @dataclass(frozen=True)
@@ -134,6 +141,15 @@ def parse_config(data: dict[str, Any]) -> TestConfig:
     if sample is None and not samples:
         raise ValueError("Config requires sample or samples")
 
+    _normalize_kwargs: dict[str, Any] = {
+        "trim": _optional_bool(normalize_data, "trim", True),
+        "ignore_empty_lines": _optional_bool(normalize_data, "ignore_empty_lines", True),
+        "ignore_patterns": _parse_ignore_patterns(normalize_data),
+    }
+    _ignore_patterns_file = _optional_string(normalize_data, "ignore_patterns_file")
+    if _ignore_patterns_file:
+        _normalize_kwargs["ignore_patterns_file"] = _ignore_patterns_file
+
     return TestConfig(
         vm_id=_required_string(data, "vm_id"),
         snapshot=_optional_string(data, "snapshot"),
@@ -152,10 +168,7 @@ def parse_config(data: dict[str, Any]) -> TestConfig:
             wait_guest_seconds=int(timeouts_data.get("wait_guest_seconds", 180)),
             command_seconds=int(timeouts_data.get("command_seconds", 120)),
         ),
-        normalize=NormalizeConfig(
-            trim=_optional_bool(normalize_data, "trim", True),
-            ignore_empty_lines=_optional_bool(normalize_data, "ignore_empty_lines", True),
-        ),
+        normalize=NormalizeConfig(**_normalize_kwargs),
         av_log_collectors=_parse_av_log_collectors(data.get("av_logs") or {}),
         provider=ProviderConfig(type=str(provider_data.get("type") or "vmrun")),
     )
@@ -181,6 +194,7 @@ def to_test_case(config: TestConfig, password: str | None = None) -> TestCase:
         command_timeout_seconds=config.timeouts.command_seconds,
         normalize_trim=config.normalize.trim,
         normalize_ignore_empty_lines=config.normalize.ignore_empty_lines,
+        normalize_ignore_patterns=_resolve_ignore_patterns(config.normalize),
         samples=tuple(_to_sample_spec(sample_config) for sample_config in config.samples),
         verification=_to_verification_spec(config.verification),
         av_log_collectors=tuple(_to_av_log_spec(collector) for collector in config.av_log_collectors),
@@ -214,8 +228,14 @@ def to_yaml_dict(config: TestConfig) -> dict[str, Any]:
             "command_seconds": config.timeouts.command_seconds,
         },
         "normalize": {
-            "trim": config.normalize.trim,
-            "ignore_empty_lines": config.normalize.ignore_empty_lines,
+            key: value
+            for key, value in {
+                "trim": config.normalize.trim,
+                "ignore_empty_lines": config.normalize.ignore_empty_lines,
+                "ignore_patterns": config.normalize.ignore_patterns or None,
+                "ignore_patterns_file": config.normalize.ignore_patterns_file,
+            }.items()
+            if value or (isinstance(value, bool))
         },
         "provider": {"type": config.provider.type},
     }
@@ -417,6 +437,54 @@ def _validate_sample_id(sample_id: str) -> str:
     if not _SAMPLE_ID_PATTERN.fullmatch(sample_id):
         raise ValueError("Sample id must be 1-64 characters and not contain / or \\")
     return sample_id
+
+
+def _parse_ignore_patterns(data: dict[str, Any]) -> tuple[str, ...]:
+    raw = data.get("ignore_patterns")
+    if raw is None:
+        return ()
+    if isinstance(raw, str):
+        return (raw,)
+    if isinstance(raw, list):
+        return tuple(str(item) for item in raw)
+    raise ValueError("normalize.ignore_patterns must be a string or list of strings")
+
+
+def _resolve_patterns_path(file_path: str) -> Path | None:
+    path = Path(file_path)
+    if path.is_file():
+        return path
+    if not path.is_absolute():
+        package_path = _PACKAGE_DIR.parent.parent / file_path
+        if package_path.is_file():
+            return package_path
+    return None
+
+
+def _load_ignore_patterns_file(file_path: str) -> tuple[str, ...]:
+    path = _resolve_patterns_path(file_path)
+    if path is None:
+        _LOGGER.warning("Ignore patterns file not found, skipping: %s", file_path)
+        return ()
+    patterns: list[str] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        patterns.append(stripped)
+    _LOGGER.debug("Loaded %d ignore patterns from %s: %s", len(patterns), path, patterns)
+    return tuple(patterns)
+
+
+def _resolve_ignore_patterns(normalize: NormalizeConfig) -> tuple[str, ...]:
+    patterns = list(normalize.ignore_patterns)
+    if normalize.ignore_patterns_file:
+        patterns.extend(_load_ignore_patterns_file(normalize.ignore_patterns_file))
+    return tuple(patterns)
+
+
+def load_default_ignore_patterns() -> tuple[str, ...]:
+    return _load_ignore_patterns_file(DEFAULT_IGNORE_PATTERNS_FILE)
 
 
 def _required_mapping(data: dict[str, Any], key: str) -> dict[str, Any]:

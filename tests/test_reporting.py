@@ -75,6 +75,7 @@ def test_write_batch_report_creates_summary_and_sample_artifacts(tmp_path):
     assert data["schema_version"] == 2
     assert data["summary"]["total"] == 1
     assert data["summary"]["overall_classification"] == "BASELINE_VALID"
+    assert "duration_seconds" in data["summary"]
     assert (tmp_path / "samples" / "one" / "result.json").exists()
     assert (tmp_path / "samples" / "one" / "before.txt").read_text(encoding="utf-8-sig") == "before"
 
@@ -108,6 +109,7 @@ def test_write_batch_report_creates_csv_and_html(tmp_path):
     assert [row["sample_id"] for row in rows] == ["one", "two"]
     assert rows[0]["classification"] == "BASELINE_VALID"
     assert rows[0]["report_dir"] == "samples/one"
+    assert "duration_seconds" in rows[0]
     html = html_path.read_text(encoding="utf-8")
     assert "VM Auto Test — 批量测试报告" in html
     assert "result.csv" in html

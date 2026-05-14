@@ -349,6 +349,53 @@ async def test_run_emits_progress_events(tmp_path):
     assert "C:\\Samples\\sample.exe" not in [event.detail for event in events]
 
 
+@pytest.mark.asyncio
+async def test_run_skips_sample_when_file_not_on_guest(tmp_path):
+    provider = FakeProvider(before="initial", after="should_not_be_used", file_exists=False)
+    events = []
+    test_case = TestCase(
+        vm_id="vm1",
+        snapshot="clean",
+        mode=TestMode.BASELINE,
+        sample_command="C:\\Samples\\sample.exe",
+        verify_command="Get-Item C:\\marker.txt",
+        credentials=GuestCredentials("user", "pass"),
+    )
+
+    result = await TestOrchestrator(provider, tmp_path, progress=events.append).run(test_case)
+
+    assert result.classification == Classification.BASELINE_INVALID
+    assert result.changed is False
+    assert result.sample.capture_method == "skipped_file_not_found"
+    # after_verification must NOT be in provider.commands (only before)
+    assert provider.commands.count("Get-Item C:\\marker.txt") == 1
+    # run_sample step should be skipped
+    run_steps = [e for e in events if e.name == "run_sample"]
+    assert any(e.status == "skipped" for e in run_steps)
+    assert any("样本文件不存在" in e.detail for e in run_steps)
+
+
+@pytest.mark.asyncio
+async def test_run_skips_sample_when_file_not_on_guest_with_screenshot(tmp_path):
+    provider = FakeProvider(before="initial", after="should_not_be_used", file_exists=False)
+    events = []
+    test_case = TestCase(
+        vm_id="vm1",
+        snapshot="clean",
+        mode=TestMode.BASELINE,
+        sample_command="C:\\Samples\\sample.exe",
+        verify_command="Get-Item C:\\marker.txt",
+        credentials=GuestCredentials("user", "pass"),
+        capture_screenshot=True,
+    )
+
+    result = await TestOrchestrator(provider, tmp_path, progress=events.append).run(test_case)
+
+    assert result.classification == Classification.BASELINE_INVALID
+    # Screenshot should still be captured
+    assert "capture_screen:" in str(provider.commands)
+
+
 # -- script generation tests -------------------------------------------------
 
 

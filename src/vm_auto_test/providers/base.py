@@ -59,5 +59,10 @@ class VmwareProvider(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    async def file_exists_on_guest(self, vm_id: str, guest_path: str, credentials: GuestCredentials) -> bool:
+        """Return True if the file exists on the guest VM."""
+        raise NotImplementedError
+
+    @abstractmethod
     async def capture_screen(self, vm_id: str, output_path: str, credentials: GuestCredentials) -> str:
         raise NotImplementedError

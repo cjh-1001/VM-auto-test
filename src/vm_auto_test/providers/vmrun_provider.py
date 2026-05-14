@@ -336,6 +336,16 @@ class VmrunProvider(VmwareProvider):
                     credentials,
                 )
 
+    async def file_exists_on_guest(self, vm_id: str, guest_path: str, credentials: GuestCredentials) -> bool:
+        try:
+            result = await self._vmrun.file_exists(
+                vm_id, guest_path,
+                user=credentials.user, password=credentials.password,
+            )
+            return "exists" in result.lower()
+        except RuntimeError:
+            return False
+
     async def capture_screen(self, vm_id: str, output_path: str, credentials: GuestCredentials) -> str:
         return await self._vmrun.capture_screen(vm_id, output_path, user=credentials.user, password=credentials.password)
 

@@ -1,0 +1,18 @@
+# 输出对比时忽略的动态行（每行一个正则表达式）
+# 以 # 开头的行为注释，空行自动忽略
+#
+# 用法：在 YAML 配置中设置 normalize.ignore_patterns_file: "configs/ignore_patterns.txt"
+
+# ── dir 命令：磁盘剩余空间每次执行都会变化 ──
+# 英文系统: X Dir(s)  N,NNN,NNN,NNN bytes free
+\d+\s+Dir\(s\)\s+[\d,]+\s+bytes free
+# 中文系统: X 个目录  N,NNN,NNN,NNN 可用字节
+\d+\s+个目录\s+[\d,]+\s+可用字节
+
+# ── net user 命令：密码相关时间戳 ──
+Password last set\s+.*
+Password changeable\s+.*
+
+# ── net user 命令：组成员关系每台机器不同 ──
+Local Group Memberships\s+.*
+Global Group memberships\s+.*

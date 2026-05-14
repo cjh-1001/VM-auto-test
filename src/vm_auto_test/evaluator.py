@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 from typing import Any
 
@@ -17,6 +18,8 @@ from vm_auto_test.models import (
     VerificationSpec,
 )
 
+_LOGGER = logging.getLogger(__name__)
+
 
 def normalize_output(value: str, test_case: TestCase) -> str:
     lines = value.replace("\r\n", "\n").replace("\r", "\n").split("\n")
@@ -24,6 +27,12 @@ def normalize_output(value: str, test_case: TestCase) -> str:
         lines = [line.strip() for line in lines]
     if test_case.normalize_ignore_empty_lines:
         lines = [line for line in lines if line]
+    for raw in test_case.normalize_ignore_patterns:
+        pattern = re.compile(raw)
+        matched_lines = [line for line in lines if pattern.search(line)]
+        if matched_lines:
+            _LOGGER.debug("Ignore pattern %r removed %d line(s): %r", raw, len(matched_lines), matched_lines)
+        lines = [line for line in lines if not pattern.search(line)]
     return "\n".join(lines)
 
 

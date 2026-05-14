@@ -28,7 +28,9 @@ async def test_run_batch_executes_each_sample_with_isolated_snapshot(tmp_path):
     result = await TestOrchestrator(provider, tmp_path).run_batch(test_case)
 
     assert result.classification == Classification.BASELINE_VALID
+    assert result.duration_seconds >= 0
     assert [sample.sample_spec.id for sample in result.samples] == ["one", "two"]
+    assert all(sample.duration_seconds >= 0 for sample in result.samples)
     assert provider.commands == [
         "revert:clean",
         "start",
@@ -145,3 +147,39 @@ async def test_run_batch_emits_sample_progress_events(tmp_path):
     ]
     assert (events[-2].name, events[-2].status) == ("write_batch_report", "started")
     assert (events[-1].name, events[-1].status) == ("write_batch_report", "passed")
+
+
+@pytest.mark.asyncio
+async def test_run_batch_skips_sample_when_file_not_on_guest(tmp_path):
+    class SelectiveFileProvider(FakeProvider):
+        def __init__(self):
+            super().__init__(outputs=["before-1", "before-2", "sample-2", "after-2"])
+            self._missing_paths = {"C:\\Samples\\missing.exe"}
+
+        async def file_exists_on_guest(self, vm_id, guest_path, credentials):
+            return guest_path not in self._missing_paths
+
+    provider = SelectiveFileProvider()
+    events = []
+    test_case = TestCase(
+        vm_id="vm1",
+        snapshot="clean",
+        mode=TestMode.BASELINE,
+        sample_command="legacy.exe",
+        verify_command="verify",
+        credentials=GuestCredentials("user", "pass"),
+        samples=(
+            SampleSpec(id="one", command="C:\\Samples\\missing.exe"),
+            SampleSpec(id="two", command="C:\\Samples\\present.exe"),
+        ),
+    )
+
+    result = await TestOrchestrator(provider, tmp_path, progress=events.append).run_batch(test_case)
+
+    sample_events = [e for e in events if e.name == "run_sample" and e.status != "started"]
+    statuses = [(e.status,) for e in sample_events]
+    assert statuses == [("skipped",), ("passed",)]
+    assert result.samples[0].classification == Classification.BASELINE_INVALID
+    assert result.samples[1].classification == Classification.BASELINE_VALID
+    assert result.samples[0].sample.capture_method == "skipped_file_not_found"
+    assert result.samples[1].sample.capture_method == "direct"

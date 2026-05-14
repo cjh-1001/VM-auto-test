@@ -9,9 +9,10 @@ from vm_auto_test.models import Shell
 
 
 class FakeProvider(VmwareProvider):
-    def __init__(self, before: str = "", after: str = "", outputs: list[str] | None = None) -> None:
+    def __init__(self, before: str = "", after: str = "", outputs: list[str] | None = None, file_exists: bool = True) -> None:
         self.commands: list[str] = []
         self._outputs = list(outputs) if outputs is not None else [before, "sample output", after]
+        self._file_exists = file_exists
 
     async def list_running_vms(self) -> list[str]:
         return ["vm1"]
@@ -55,6 +56,9 @@ class FakeProvider(VmwareProvider):
     async def capture_screen(self, vm_id: str, output_path: str, credentials: GuestCredentials) -> str:
         self.commands.append(f"capture_screen:{output_path}")
         return output_path
+
+    async def file_exists_on_guest(self, vm_id: str, guest_path: str, credentials: GuestCredentials) -> bool:
+        return self._file_exists
 
 
 async def run_case(tmp_path, mode: TestMode, before: str, after: str, baseline_result: str | None = None):

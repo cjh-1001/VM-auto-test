@@ -22,11 +22,13 @@ from vm_auto_test.config import (
     TimeoutConfig,
     VerificationConfig,
     load_config,
+    load_default_ignore_patterns,
     parse_csv_samples,
     scan_samples_from_directory,
     to_test_case,
     write_config,
 )
+from vm_auto_test.commands.output import classify_cn, display_ljust, display_width, print_batch_report_paths, print_batch_summary, print_progress, reset_progress
 from vm_auto_test.env import (
     is_env_configured,
     load_credentials_store,
@@ -243,14 +245,12 @@ async def main_async(argv: Sequence[str] | None = None) -> int:
             samples=sample_specs,
             verification=VerificationSpec(command=verify_command, shell=verify_shell),
             capture_screenshot=args.capture_screenshot,
+            normalize_ignore_patterns=load_default_ignore_patterns(),
         )
         reset_progress()
         batch_result = await run_dir_orchestrator.run_batch(test_case)
-        max_id_width = max((_display_width(s.sample_spec.id) for s in batch_result.samples), default=0)
-        for sample_item in batch_result.samples:
-            label = _classify_cn(sample_item.classification, short=True)
-            print(f"  {_display_ljust(sample_item.sample_spec.id, max_id_width + 2)}  {label}")
-        _print_batch_report_paths(batch_result.report_dir)
+        print_batch_summary(batch_result)
+        print_batch_report_paths(batch_result.report_dir)
         return 0
 
     if args.command == "run-csv":
@@ -304,14 +304,12 @@ async def main_async(argv: Sequence[str] | None = None) -> int:
             samples=tuple(sample_specs),
             verification=first_verification,
             capture_screenshot=args.capture_screenshot,
+            normalize_ignore_patterns=load_default_ignore_patterns(),
         )
         reset_progress()
         batch_result = await csv_orchestrator.run_batch(test_case)
-        max_id_width = max((_display_width(s.sample_spec.id) for s in batch_result.samples), default=0)
-        for sample_item in batch_result.samples:
-            label = _classify_cn(sample_item.classification, short=True)
-            print(f"  {_display_ljust(sample_item.sample_spec.id, max_id_width + 2)}  {label}")
-        _print_batch_report_paths(batch_result.report_dir)
+        print_batch_summary(batch_result)
+        print_batch_report_paths(batch_result.report_dir)
         return 0
 
     if args.command == "init-config":
@@ -333,11 +331,8 @@ async def main_async(argv: Sequence[str] | None = None) -> int:
         if config.samples:
             reset_progress()
             batch_result = await config_orchestrator.run_batch(test_case)
-            max_id_width = max((_display_width(s.sample_spec.id) for s in batch_result.samples), default=0)
-            for sample in batch_result.samples:
-                label = _classify_cn(sample.classification, short=True)
-                print(f"  {_display_ljust(sample.sample_spec.id, max_id_width + 2)}  {label}")
-            _print_batch_report_paths(batch_result.report_dir)
+            print_batch_summary(batch_result)
+            print_batch_report_paths(batch_result.report_dir)
             return 0
         reset_progress()
         await config_orchestrator.run(test_case)
@@ -379,6 +374,7 @@ async def main_async(argv: Sequence[str] | None = None) -> int:
         credentials=GuestCredentials(guest_user, guest_password),
         baseline_result=args.baseline_result,
         capture_screenshot=args.capture_screenshot,
+        normalize_ignore_patterns=load_default_ignore_patterns(),
     )
     reset_progress()
     await orchestrator.run(test_case)
@@ -844,6 +840,7 @@ async def _interactive_single(provider: VmwareProvider) -> None:
                 verify_command=verify_command, verify_shell=verify_shell,
                 credentials=GuestCredentials(guest_user, guest_password),
                 capture_screenshot=capture_screenshot,
+                normalize_ignore_patterns=load_default_ignore_patterns(),
             )
             orch = TestOrchestrator(provider, Path("reports"), progress=print_progress)
             try:
@@ -1018,6 +1015,7 @@ async def _interactive_csv(provider: VmwareProvider) -> None:
                 samples=tuple(sample_specs),
                 verification=first_v or VerificationSpec(command="", shell=Shell.POWERSHELL),
                 capture_screenshot=capture_screenshot,
+                normalize_ignore_patterns=load_default_ignore_patterns(),
             )
             orch = TestOrchestrator(provider, Path("reports"), progress=print_progress)
             try:
@@ -1025,11 +1023,8 @@ async def _interactive_csv(provider: VmwareProvider) -> None:
                 batch_result = await orch.run_batch(test_case)
             except VmToolsNotReadyError:
                 return
-            max_id_width = max((_display_width(s.sample_spec.id) for s in batch_result.samples), default=0)
-            for s in batch_result.samples:
-                label = _classify_cn(s.classification, short=True)
-                print(f"    {_display_ljust(s.sample_spec.id, max_id_width + 2)}  {label}")
-            _print_batch_report_paths(batch_result.report_dir, indent="    ")
+            print_batch_summary(batch_result, indent="    ")
+            print_batch_report_paths(batch_result.report_dir, indent="    ")
             return
 
 
@@ -1092,101 +1087,11 @@ def _strip_quotes_env(value: str) -> str:
     return value
 
 
-def _print_batch_report_paths(report_dir: str, indent: str = "  ") -> None:
-    print(f"\n{indent}报告文件:")
-    print(f"{indent}  HTML: {report_dir}/result.html")
-    print(f"{indent}  CSV:  {report_dir}/result.csv")
-
-
-def _classify_cn(classification: Any, short: bool = False) -> str:
-    mapping = {
-        "BASELINE_VALID": "✓ SUCCESS — 有效" if short else "样本有效（前后输出有变化）",
-        "BASELINE_INVALID": "✗ FAILED — 无效" if short else "样本无效（前后输出无变化）",
-        "AV_NOT_BLOCKED": "✗ FAILED — 未拦截" if short else "杀软未拦截（攻击效果发生）",
-        "AV_BLOCKED_OR_NO_CHANGE": "✓ SUCCESS — 已拦截" if short else "杀软已拦截或未生效",
-    }
-    value = classification.value if hasattr(classification, "value") else str(classification)
-    return mapping.get(value, value)
-
-
 def _quote_if_needed(value: str) -> str:
     if value and (" " in value or "\\" in value):
         if '"' not in value:
             return f'"{value}"'
     return value
-
-
-def _display_width(text: str) -> int:
-    """Count display width: CJK chars = 2, ASCII = 1."""
-    return sum(2 if ord(c) > 127 else 1 for c in text)
-
-
-def _display_ljust(text: str, width: int) -> str:
-    """ljust that accounts for CJK display width."""
-    return text + " " * max(0, width - _display_width(text))
-
-
-_STEP_LABELS: dict[str, str] = {
-    "create_report_dir": "创建报告目录",
-    "revert_snapshot": "回滚到快照",
-    "start_vm": "开机",
-    "wait_guest_ready": "等待系统就绪",
-    "detect_av": "识别杀软环境",
-    "before_verification": "攻击前环境检查",
-    "run_sample": "执行恶意样本",
-    "after_verification": "攻击后效果验证",
-    "capture_screenshot": "截取 VM 画面",
-    "collect_av_logs": "采集杀软日志",
-    "evaluate": "判定攻击效果",
-    "write_report": "生成测试报告",
-    "write_batch_report": "生成批量报告",
-    "batch_sample": "处理样本",
-    "batch_evaluate": "批量判定",
-}
-
-_SUB_STEPS = {"check_vmware_tools", "guest_process_check", "guest_script"}
-
-_last_stage: str = ""
-
-
-def reset_progress() -> None:
-    global _last_stage
-    _last_stage = ""
-
-
-def print_progress(step: StepResult) -> None:
-    global _last_stage
-
-    # Skip internal sub-steps to reduce noise
-    if step.name in _SUB_STEPS:
-        return
-
-    # Only show final results, not started events
-    if step.status == "started":
-        return
-
-    # Command output: print indented under the preceding step
-    if step.name.endswith("_output"):
-        _print_indented(step.detail)
-        return
-
-    # Stage header when stage changes
-    stage = step.stage.strip()
-    if stage and stage != _last_stage:
-        _last_stage = stage
-        print(f"\n  ── {stage} ──")
-
-    label = _STEP_LABELS.get(step.name, step.name.replace("_", " "))
-    icon = "✓" if step.status == "passed" else "✗"
-    label_col = _display_ljust(label, 18)
-    detail = step.detail if step.detail else ""
-    print(f"  {icon} {label_col}{detail}", flush=True)
-
-
-def _print_indented(text: str, indent: int = 6) -> None:
-    prefix = " " * indent
-    for line in text.splitlines():
-        print(f"{prefix}│ {line}", flush=True)
 
 
 async def build_config_interactively(

@@ -126,6 +126,7 @@ def to_sample_report_dict(result: SampleTestResult) -> dict[str, Any]:
         "comparisons": _comparison_dicts(result.evaluation),
         "av_logs": _log_dicts(result.logs),
         "steps": [asdict(step) for step in result.steps],
+        "duration_seconds": round(result.duration_seconds, 2),
     }
 
 
@@ -143,6 +144,7 @@ def to_batch_report_dict(result: BatchTestResult) -> dict[str, Any]:
             "total": len(result.samples),
             "classification_counts": counts,
             "overall_classification": result.classification.value,
+            "duration_seconds": round(result.duration_seconds, 2),
         },
         "samples": [
             {
@@ -152,6 +154,7 @@ def to_batch_report_dict(result: BatchTestResult) -> dict[str, Any]:
                 "effect_observed": sample.evaluation.effect_observed,
                 "report_dir": _relative_sample_report_dir(result, sample),
                 "steps": [asdict(step) for step in sample.steps],
+                "duration_seconds": round(sample.duration_seconds, 2),
             }
             for sample in result.samples
         ],
@@ -180,6 +183,7 @@ _BATCH_CSV_FIELDS = (
     "after_capture_method",
     "av_log_count",
     "report_dir",
+    "duration_seconds",
 )
 
 
@@ -220,6 +224,7 @@ def _batch_csv_rows(result: BatchTestResult) -> list[dict[str, Any]]:
                 "after_capture_method": sample.after.capture_method,
                 "av_log_count": len(sample.logs),
                 "report_dir": _relative_sample_report_dir(result, sample),
+                "duration_seconds": round(sample.duration_seconds, 2),
             }
         )
     return rows
@@ -265,6 +270,7 @@ def _write_batch_html(result: BatchTestResult, report_dir: Path) -> None:
     fail_pct = 100 - pass_pct
     overall_label = _html_escape(_html_label(result.classification.value))
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    total_duration = _format_duration(result.duration_seconds)
     mode_cn = "BASELINE — 验证样本有效性" if result.test_case.mode.value == "baseline" else "AV — 验证杀软拦截"
     baseline_str = _html_escape(result.test_case.baseline_result or "")
 
@@ -500,6 +506,7 @@ def _write_batch_html(result: BatchTestResult, report_dir: Path) -> None:
       <div class="topbar-right">
         <span class="topbar-pill"><strong>模式</strong> {_html_escape(result.test_case.mode.value.upper())}</span>
         <span class="topbar-pill"><strong>快照</strong> {_html_escape(result.test_case.snapshot or "—")}</span>
+        <span class="topbar-pill"><strong>总用时</strong> {total_duration}</span>
         <span class="topbar-pill"><strong>生成时间</strong> {now_str}</span>
       </div>
     </div>
@@ -578,6 +585,7 @@ def _write_batch_html(result: BatchTestResult, report_dir: Path) -> None:
             <th data-sort="fx">效果发生 <span class="sort-arrow">⇅</span></th>
             <th data-sort="sc">样本命令 <span class="sort-arrow">⇅</span></th>
             <th data-sort="vc">验证命令 <span class="sort-arrow">⇅</span></th>
+            <th data-sort="dur">用时 <span class="sort-arrow">⇅</span></th>
             <th>产出文件</th>
           </tr>
         </thead>
@@ -621,7 +629,7 @@ def _write_batch_html(result: BatchTestResult, report_dir: Path) -> None:
         rows.forEach(function(r){{tbody.appendChild(r)}});
       }});
       function getCell(row,col){{
-        var map={{id:0,class:1,fx:2,sc:3,vc:4}};
+        var map={{id:0,class:1,fx:2,sc:3,vc:4,dur:5}};
         var i=map[col]!=null?map[col]:0;
         var td=row.children[i];
         return(td?td.textContent.trim():'');
@@ -700,12 +708,15 @@ def _sample_html_row(result: BatchTestResult, sample: SampleTestResult, report_d
     sample_cmd = _html_escape(sample.sample_spec.command)
     verify_cmd = _html_escape(verification.command)
 
+    duration_str = _format_duration(sample.duration_seconds)
+
     return f"""        <tr class="{row_class}">
           <td><strong>{_html_escape(sample.sample_spec.id)}</strong></td>
           <td><span class="badge {badge_class}"><span class="badge-dot"></span>{label}</span></td>
           <td class="effect-cell">{effect_html}</td>
           <td class="cmd"><div class="cmd-wrapper"><code title="{sample_cmd}">{sample_cmd}</code><button class="btn-copy" title="复制">⎘</button></div></td>
           <td class="cmd"><div class="cmd-wrapper"><code title="{verify_cmd}">{verify_cmd}</code><button class="btn-copy" title="复制">⎘</button></div></td>
+          <td>{duration_str}</td>
           <td><div class="artifact-links">{"".join(artifact_links)}</div></td>
         </tr>"""
 
@@ -744,6 +755,14 @@ def _html_link(href: str, label: str) -> str:
 
 def _bool_text(value: bool) -> str:
     return "true" if value else "false"
+
+
+def _format_duration(seconds: float) -> str:
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    minutes = int(seconds // 60)
+    secs = seconds % 60
+    return f"{minutes}m {secs:.0f}s"
 
 
 def load_baseline_is_valid(path: str) -> bool:

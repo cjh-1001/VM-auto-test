@@ -126,6 +126,7 @@ class TestCase:
     command_timeout_seconds: int = 120
     normalize_trim: bool = True
     normalize_ignore_empty_lines: bool = True
+    normalize_ignore_patterns: tuple[str, ...] = field(default_factory=tuple)
     samples: tuple[SampleSpec, ...] = field(default_factory=tuple)
     verification: VerificationSpec | None = None
     av_log_collectors: tuple[AvLogCollectorSpec, ...] = field(default_factory=tuple)
@@ -182,6 +183,7 @@ class SampleTestResult:
     classification: Classification
     steps: tuple[StepResult, ...] = field(default_factory=tuple)
     logs: tuple[CollectedLog, ...] = field(default_factory=tuple)
+    duration_seconds: float = 0.0
 
     @property
     def changed(self) -> bool:
@@ -195,3 +197,4 @@ class BatchTestResult:
     samples: tuple[SampleTestResult, ...]
     classification: Classification
     steps: tuple[StepResult, ...] = field(default_factory=tuple)
+    duration_seconds: float = 0.0

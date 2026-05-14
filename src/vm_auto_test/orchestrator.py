@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from collections.abc import Awaitable, Callable
 from datetime import datetime
 from pathlib import Path
@@ -34,6 +35,34 @@ from vm_auto_test.reporting import (
 
 _LOGGER = logging.getLogger(__name__)
 _SAMPLE_ID_PATTERN = re.compile(r"^[^\x00-\x1f/\\]{1,64}$")
+
+
+def _extract_sample_path(command: str) -> str | None:
+    """Extract the first path-like token from a sample command string.
+
+    Handles plain paths, quoted paths, and paths with arguments.
+    Returns None if no recognizable path is found.
+    """
+    command = command.strip()
+    if not command:
+        return None
+    if command[0] == '"':
+        end = command.find('"', 1)
+        if end > 0:
+            token = command[1:end]
+            return token if token else None
+        return None
+    space = command.find(" ")
+    token = command[:space] if space > 0 else command
+    # Strip unmatched trailing quote (e.g. user typed path with closing " only)
+    token = token.rstrip('"')
+    if not token:
+        return None
+    if len(token) >= 3 and token[1] == ":" and token[2] == "\\":
+        return token
+    if token.startswith("\\\\"):
+        return token
+    return None
 
 
 def _verdict_text(classification: Classification, mode: TestMode, changed: bool) -> str:
@@ -135,6 +164,10 @@ class TestOrchestrator:
             self._log_path.open("a", encoding="utf-8").write(
                 f"{timestamp}  {stage_part}✗ {name}  {detail}\n"
             )
+        elif status == "skipped":
+            self._log_path.open("a", encoding="utf-8").write(
+                f"{timestamp}  {stage_part}⊘ {name}  {detail}\n"
+            )
 
     async def run(self, test_case: TestCase) -> TestResult:
         self._validate_test_case(test_case)
@@ -150,6 +183,7 @@ class TestOrchestrator:
         self._log_path = report_dir / "test.log"
 
         await self._prepare_vm(test_case, steps)
+        await self._detect_av_step(test_case, steps)
 
         verification = test_case.effective_verification()
 
@@ -170,30 +204,42 @@ class TestOrchestrator:
         steps.append(StepResult("before_verification", "passed", before.capture_method, self._stage))
         self._emit_command_output("before_verification", before)
 
-        self._stage = "运行恶意脚本"
-        sample = await self._run_sample_safe(
-            test_case,
-            test_case.sample_command,
-            test_case.sample_shell,
-        )
-        steps.append(StepResult("run_sample", sample.exit_code == 0 and "passed" or "failed", sample.capture_method, self._stage))
+        sample_path = _extract_sample_path(test_case.sample_command)
+        if sample_path is not None and not await self._verify_sample_on_guest(test_case, sample_path):
+            self._stage = "运行恶意脚本"
+            skip_detail = f"跳过: 样本文件不存在 ({sample_path})"
+            self._emit("run_sample", "skipped", skip_detail)
+            steps.append(StepResult("run_sample", "skipped", skip_detail, self._stage))
+            sample = CommandResult(
+                command=test_case.sample_command,
+                capture_method="skipped_file_not_found",
+            )
+            after = before
+        else:
+            self._stage = "运行恶意脚本"
+            sample = await self._run_sample_safe(
+                test_case,
+                test_case.sample_command,
+                test_case.sample_shell,
+            )
+            steps.append(StepResult("run_sample", sample.exit_code == 0 and "passed" or "failed", sample.capture_method, self._stage))
 
-        self._stage = "验证攻击效果"
-        after = await self._run_progress_step(
-            "after_verification",
-            "verification",
-            lambda: self._provider.run_guest_command(
-                test_case.vm_id,
-                verification.command,
-                verification.shell,
-                test_case.credentials,
-                test_case.command_timeout_seconds,
-                progress=self._emit_step,
-            ),
-            lambda result: result.capture_method,
-        )
-        steps.append(StepResult("after_verification", "passed", after.capture_method, self._stage))
-        self._emit_command_output("after_verification", after)
+            self._stage = "验证攻击效果"
+            after = await self._run_progress_step(
+                "after_verification",
+                "verification",
+                lambda: self._provider.run_guest_command(
+                    test_case.vm_id,
+                    verification.command,
+                    verification.shell,
+                    test_case.credentials,
+                    test_case.command_timeout_seconds,
+                    progress=self._emit_step,
+                ),
+                lambda result: result.capture_method,
+            )
+            steps.append(StepResult("after_verification", "passed", after.capture_method, self._stage))
+            self._emit_command_output("after_verification", after)
 
         if test_case.capture_screenshot:
             self._stage = "验证攻击效果"
@@ -261,6 +307,7 @@ class TestOrchestrator:
 
     async def run_batch(self, test_case: TestCase) -> BatchTestResult:
         self._validate_test_case(test_case)
+        t0 = time.monotonic()
 
         self._stage = "结果"
         report_dir = self._run_sync_progress_step(
@@ -273,11 +320,13 @@ class TestOrchestrator:
         sample_results: list[SampleTestResult] = []
         steps: list[StepResult] = []
 
-        for sample in test_case.effective_samples():
+        samples = test_case.effective_samples()
+        for idx, sample in enumerate(samples):
             self._validate_sample_id(sample.id)
             sample_dir = report_dir / "samples" / sample.id
             self._emit("batch_sample", "started", sample.id)
-            result = await self._run_single_sample(test_case, sample, sample_dir)
+            run_av_detect = idx == 0
+            result = await self._run_single_sample(test_case, sample, sample_dir, run_av_detect=run_av_detect)
             self._emit("batch_sample", "passed", sample.id)
             sample_results.append(result)
             steps.append(StepResult("batch_sample", "passed", sample.id, ""))
@@ -297,6 +346,7 @@ class TestOrchestrator:
             samples=tuple(sample_results),
             classification=classification,
             steps=tuple(steps),
+            duration_seconds=time.monotonic() - t0,
         )
 
         self._stage = "结果"
@@ -313,10 +363,15 @@ class TestOrchestrator:
         test_case: TestCase,
         sample: SampleSpec,
         report_dir: Path,
+        *,
+        run_av_detect: bool = True,
     ) -> SampleTestResult:
+        t0 = time.monotonic()
         steps: list[StepResult] = []
 
         await self._prepare_vm(test_case, steps)
+        if run_av_detect:
+            await self._detect_av_step(test_case, steps)
 
         verification = sample.verification or test_case.effective_verification()
 
@@ -330,19 +385,31 @@ class TestOrchestrator:
         steps.append(StepResult("before_verification", "passed", before.capture_method, self._stage))
         self._emit_command_output("before_verification", before)
 
-        self._stage = "运行恶意脚本"
-        sample_result = await self._run_sample_safe(test_case, sample.command, sample.shell)
-        steps.append(StepResult("run_sample", sample_result.exit_code == 0 and "passed" or "failed", sample_result.capture_method, self._stage))
+        sample_path = _extract_sample_path(sample.command)
+        if sample_path is not None and not await self._verify_sample_on_guest(test_case, sample_path):
+            self._stage = "运行恶意脚本"
+            skip_detail = f"跳过: 样本文件不存在 ({sample_path})"
+            self._emit("run_sample", "skipped", skip_detail)
+            steps.append(StepResult("run_sample", "skipped", skip_detail, self._stage))
+            sample_result = CommandResult(
+                command=sample.command,
+                capture_method="skipped_file_not_found",
+            )
+            after = before
+        else:
+            self._stage = "运行恶意脚本"
+            sample_result = await self._run_sample_safe(test_case, sample.command, sample.shell)
+            steps.append(StepResult("run_sample", sample_result.exit_code == 0 and "passed" or "failed", sample_result.capture_method, self._stage))
 
-        self._stage = "验证攻击效果"
-        after = await self._run_progress_step(
-            "after_verification",
-            "verification",
-            lambda: self._run_verification(test_case, verification),
-            lambda result: result.capture_method,
-        )
-        steps.append(StepResult("after_verification", "passed", after.capture_method, self._stage))
-        self._emit_command_output("after_verification", after)
+            self._stage = "验证攻击效果"
+            after = await self._run_progress_step(
+                "after_verification",
+                "verification",
+                lambda: self._run_verification(test_case, verification),
+                lambda result: result.capture_method,
+            )
+            steps.append(StepResult("after_verification", "passed", after.capture_method, self._stage))
+            self._emit_command_output("after_verification", after)
 
         if test_case.capture_screenshot:
             self._stage = "验证攻击效果"
@@ -396,6 +463,7 @@ class TestOrchestrator:
             classification=classification,
             steps=tuple(steps),
             logs=logs,
+            duration_seconds=time.monotonic() - t0,
         )
 
     async def _prepare_vm(self, test_case: TestCase, steps: list[StepResult]) -> None:
@@ -428,18 +496,20 @@ class TestOrchestrator:
         )
         steps.append(StepResult("wait_guest_ready", "passed", "guest tools", self._stage))
 
-        if test_case.mode == TestMode.AV:
-            self._stage = "验证环境"
-            try:
-                detected = await self._run_progress_step(
-                    "detect_av",
-                    "杀软识别",
-                    lambda: self._detect_av(test_case),
-                    lambda result: f"检测到: {result}" if result else "未检测到已知杀软",
-                )
-                steps.append(StepResult("detect_av", "passed", detected or "未识别", self._stage))
-            except Exception:
-                pass
+    async def _detect_av_step(self, test_case: TestCase, steps: list[StepResult]) -> None:
+        if test_case.mode != TestMode.AV:
+            return
+        self._stage = "验证环境"
+        try:
+            detected = await self._run_progress_step(
+                "detect_av",
+                "杀软识别",
+                lambda: self._detect_av(test_case),
+                lambda result: f"检测到: {result}" if result else "未检测到已知杀软",
+            )
+            steps.append(StepResult("detect_av", "passed", detected or "未识别", self._stage))
+        except Exception:
+            pass
 
     def _evaluate(
         self,
@@ -497,6 +567,18 @@ class TestOrchestrator:
                 command=command, stdout="", stderr="", exit_code=-1,
                 capture_method="blocked_or_timeout",
             )
+
+    async def _verify_sample_on_guest(self, test_case: TestCase, sample_path: str) -> bool:
+        try:
+            return await self._provider.file_exists_on_guest(
+                test_case.vm_id, sample_path, test_case.credentials,
+            )
+        except Exception as exc:
+            _LOGGER.warning(
+                "Sample existence check failed for %s, assuming present: %s",
+                sample_path, type(exc).__name__,
+            )
+            return True
 
     def _validate_test_case(self, test_case: TestCase) -> None:
         pass
