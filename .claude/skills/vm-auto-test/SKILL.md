@@ -19,6 +19,7 @@ It only automates execution, observation, comparison, and reporting. Do not use 
 | User intent | Command |
 |-------------|---------|
 | Interactive menu | `vm-auto-test` |
+| Plan tasks | `vm-auto-test` → `[5] 计划任务` |
 | List running VMs | `vm-auto-test vms` |
 | List snapshots | `vm-auto-test snapshots --vm "<vmx>"` |
 | Doctor (no VM) | `vm-auto-test doctor [--config <yaml>]` |
@@ -39,7 +40,10 @@ Console scripts: `vm-auto-test`, `vm-auto-test-smoke`, `vmware-mcp`.
 
 - `run --config` is the recommended config entrypoint. Do NOT mix with direct flags (`--vm`, `--mode`, `--sample-command`, `--reports-dir`); CLI rejects mixed usage.
 - Before non-interactive real runs, prefer `vm-auto-test doctor --config <yaml>` first.
-- Interactive menu: `[0] 退出` `[1] 测试单样本` `[2] 测试多样本 (CSV)` `[3] 列出 VM` `[4] 列出快照` `[5] 重新配置环境`
+- Interactive menu: `[0] 退出` `[1] 测试单样本` `[2] 测试多样本 (CSV)` `[3] 列出 VM` `[4] 列出快照` `[5] 计划任务` `[6] 重新配置环境`
+- Plan tasks are an interactive in-memory queue: add single or CSV batch tests, set repeat counts (default 1, max 100), view/delete/clear tasks, then execute sequentially in the current session.
+- Plan tasks are not persisted and are not a background scheduler/cron. Exiting the interactive session discards the queue.
+- Plan-task execution reuses existing single/batch orchestration and reports; it must not print guest passwords.
 
 ## Real-run preflight
 

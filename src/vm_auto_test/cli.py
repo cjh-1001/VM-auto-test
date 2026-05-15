@@ -38,13 +38,19 @@ from vm_auto_test.env import (
     upsert_vm_credentials,
 )
 from vm_auto_test.models import (
+    BatchTestResult,
     ComparisonSpec,
     GuestCredentials,
+    PLAN_REPEAT_COUNT_MAX,
+    PlanRunResult,
+    PlanTask,
+    PlanTaskKind,
     SampleSpec,
     Shell,
     StepResult,
     TestCase,
     TestMode,
+    TestResult,
     VerificationSpec,
 )
 from vm_auto_test.orchestrator import TestOrchestrator
@@ -524,15 +530,20 @@ async def _interactive_menu(provider: VmwareProvider, env_file: Path) -> None:
         print("  [2] 测试多样本 (CSV)")
         print("  [3] 列出 VM")
         print("  [4] 列出快照")
-        print("  [5] 重新配置环境")
+        print("  [5] 计划任务")
+        print("  [6] 重新配置环境")
         choice = input("\n  > ").strip()
 
         if choice == "0":
             print("  已退出")
             return
 
-        if choice == "5":
+        if choice == "6":
             await _interactive_setup(env_file)
+            continue
+
+        if choice == "5":
+            await _interactive_plan_menu(provider)
             continue
 
         if choice == "3":
@@ -700,6 +711,22 @@ def _prompt_vm_credentials(vm_id: str) -> GuestCredentials | None:
 
 
 async def _interactive_single(provider: VmwareProvider) -> None:
+    test_case = await _build_interactive_single_test_case(provider, confirm_action="执行")
+    if test_case is None:
+        return
+    orch = TestOrchestrator(provider, Path("reports"), progress=print_progress)
+    try:
+        reset_progress()
+        await orch.run(test_case)
+    except VmToolsNotReadyError:
+        return
+
+
+async def _build_interactive_single_test_case(
+    provider: VmwareProvider,
+    *,
+    confirm_action: str,
+) -> TestCase | None:
     vm_id: str | None = None
     snapshot: str | None = None
     mode: TestMode | None = None
@@ -712,27 +739,23 @@ async def _interactive_single(provider: VmwareProvider) -> None:
 
     step = 0
     while True:
-        # — step 0: VM —
         if step == 0:
             running = await provider.list_running_vms()
             if running:
                 print("\n  —— 选择 VM ——")
                 result = choose_from_list(running, "选择 VM")
-                if result is None:
-                    return
-                if result is _BACK:
-                    return
+                if result is None or result is _BACK:
+                    return None
                 vm_id = result
             else:
                 print("\n  —— 输入 VM 路径 ——")
                 result = _prompt_back("VM 路径")
                 if result is None:
-                    return
+                    return None
                 vm_id = clean_cli_value(result)
             step = 1
             continue
 
-        # — step 1: Snapshot —
         if step == 1:
             print("  正在查询快照 ...", flush=True)
             orchestrator = TestOrchestrator(provider, Path("reports"))
@@ -749,7 +772,7 @@ async def _interactive_single(provider: VmwareProvider) -> None:
             print("\n  —— 选择快照 ——")
             result = choose_from_list(snapshots, "选择快照")
             if result is None:
-                return
+                return None
             if result is _BACK:
                 step = 0
                 continue
@@ -757,7 +780,6 @@ async def _interactive_single(provider: VmwareProvider) -> None:
             step = 2
             continue
 
-        # — step 2: Mode —
         if step == 2:
             print("\n  —— 选择模式 ——")
             print("  baseline = 干净快照，验证样本是否有效（前后输出不同 → 有效）")
@@ -770,7 +792,6 @@ async def _interactive_single(provider: VmwareProvider) -> None:
             step = 3
             continue
 
-        # — step 3: Sample —
         if step == 3:
             print("\n  —— 样本路径 ——")
             result = _prompt_back("样本路径 (例如 C:\\Samples\\sample.exe)")
@@ -778,11 +799,10 @@ async def _interactive_single(provider: VmwareProvider) -> None:
                 step = 2
                 continue
             sample_command = result
-            sample_shell = Shell("cmd")
+            sample_shell = Shell.CMD
             step = 4
             continue
 
-        # — step 4: Verify —
         if step == 4:
             print("\n  —— 验证命令（样本跑前/跑后各执行一次）——")
             result = _prompt_back("验证命令")
@@ -798,7 +818,6 @@ async def _interactive_single(provider: VmwareProvider) -> None:
             step = 5
             continue
 
-        # — step 5: Guest —
         if step == 5:
             print("\n  —— Guest 凭据 ——")
             creds = await _resolve_and_verify_credentials(provider, vm_id)
@@ -807,16 +826,12 @@ async def _interactive_single(provider: VmwareProvider) -> None:
                 continue
             guest_user = creds.user
             guest_password = creds.password
-            # Resolve env vars in verify command (e.g. %APPDATA%)
-            resolved = await _resolve_env_vars_in_command(
-                provider, vm_id, verify_command, creds,
-            )
+            resolved = await _resolve_env_vars_in_command(provider, vm_id, verify_command, creds)
             if resolved != verify_command:
                 verify_command = resolved
             step = 6
             continue
 
-        # — step 6: Confirm —
         if step == 6:
             capture_screenshot = input("  截取 VM 截图? [y/N]: ").strip().lower() == "y"
             print(f"\n  VM:       {vm_id}")
@@ -825,33 +840,48 @@ async def _interactive_single(provider: VmwareProvider) -> None:
             print(f"  样本:     [{sample_shell.value}] {sample_command}")
             print(f"  验证:     [{verify_shell.value}] {verify_command}")
             if capture_screenshot:
-                print(f"  截图:     是")
-            confirm = input("  确认执行? [y/N]: ").strip().lower()
+                print("  截图:     是")
+            confirm = input(f"  确认{confirm_action}? [y/N]: ").strip().lower()
             if confirm == "b":
                 step = 5
                 continue
             if confirm != "y":
                 print("  已取消")
-                return
+                return None
 
-            test_case = TestCase(
-                vm_id=vm_id, snapshot=snapshot, mode=mode,
-                sample_command=sample_command, sample_shell=sample_shell,
-                verify_command=verify_command, verify_shell=verify_shell,
+            return TestCase(
+                vm_id=vm_id,
+                snapshot=snapshot,
+                mode=mode,
+                sample_command=sample_command,
+                sample_shell=sample_shell,
+                verify_command=verify_command,
+                verify_shell=verify_shell,
                 credentials=GuestCredentials(guest_user, guest_password),
                 capture_screenshot=capture_screenshot,
                 normalize_ignore_patterns=load_default_ignore_patterns(),
             )
-            orch = TestOrchestrator(provider, Path("reports"), progress=print_progress)
-            try:
-                reset_progress()
-                result = await orch.run(test_case)
-            except VmToolsNotReadyError:
-                return
-            return
 
 
 async def _interactive_csv(provider: VmwareProvider) -> None:
+    test_case = await _build_interactive_csv_test_case(provider, confirm_action="执行")
+    if test_case is None:
+        return
+    orch = TestOrchestrator(provider, Path("reports"), progress=print_progress)
+    try:
+        reset_progress()
+        batch_result = await orch.run_batch(test_case)
+    except VmToolsNotReadyError:
+        return
+    print_batch_summary(batch_result, indent="    ")
+    print_batch_report_paths(batch_result.report_dir, indent="    ")
+
+
+async def _build_interactive_csv_test_case(
+    provider: VmwareProvider,
+    *,
+    confirm_action: str,
+) -> TestCase | None:
     vm_id: str | None = None
     snapshot: str | None = None
     mode: TestMode | None = None
@@ -862,27 +892,23 @@ async def _interactive_csv(provider: VmwareProvider) -> None:
 
     step = 0
     while True:
-        # — step 0: VM —
         if step == 0:
             running = await provider.list_running_vms()
             if running:
                 print("\n  —— 选择 VM ——")
                 result = choose_from_list(running, "选择 VM")
-                if result is None:
-                    return
-                if result is _BACK:
-                    return
+                if result is None or result is _BACK:
+                    return None
                 vm_id = result
             else:
                 print("\n  —— 输入 VM 路径 ——")
                 result = _prompt_back("VM 路径")
                 if result is None:
-                    return
+                    return None
                 vm_id = clean_cli_value(result)
             step = 1
             continue
 
-        # — step 1: Snapshot —
         if step == 1:
             print("  正在查询快照 ...", flush=True)
             orchestrator = TestOrchestrator(provider, Path("reports"))
@@ -899,7 +925,7 @@ async def _interactive_csv(provider: VmwareProvider) -> None:
             print("\n  —— 选择快照 ——")
             result = choose_from_list(snapshots, "选择快照")
             if result is None:
-                return
+                return None
             if result is _BACK:
                 step = 0
                 continue
@@ -907,7 +933,6 @@ async def _interactive_csv(provider: VmwareProvider) -> None:
             step = 2
             continue
 
-        # — step 2: Mode —
         if step == 2:
             print("\n  —— 选择模式 ——")
             print("  baseline = 干净快照，验证样本是否有效（前后输出不同 → 有效）")
@@ -920,7 +945,6 @@ async def _interactive_csv(provider: VmwareProvider) -> None:
             step = 3
             continue
 
-        # — step 3: CSV —
         if step == 3:
             print("\n  —— CSV 配置 ——")
             result = _prompt_back("CSV 文件路径")
@@ -942,7 +966,6 @@ async def _interactive_csv(provider: VmwareProvider) -> None:
             step = 4
             continue
 
-        # — step 4: Guest —
         if step == 4:
             print("\n  —— Guest 凭据 ——")
             creds = await _resolve_and_verify_credentials(provider, vm_id)
@@ -954,31 +977,18 @@ async def _interactive_csv(provider: VmwareProvider) -> None:
             step = 5
             continue
 
-        # — step 5: Parse, Resolve Env Vars & Confirm —
         if step == 5:
             sample_configs_raw = parse_csv_samples(csv_path, samples_base_dir=samples_base_dir)
             creds_obj = GuestCredentials(guest_user, guest_password)
-
-            sample_configs: list = []
+            sample_configs: list[SampleConfig] = []
             for cfg in sample_configs_raw:
-                v_resolved = cfg.verification
+                verification = cfg.verification
                 if cfg.verification and cfg.verification.command:
-                    resolved_cmd = await _resolve_env_vars_in_command(
-                        provider, vm_id,
-                        cfg.verification.command,
-                        creds_obj,
-                    )
+                    resolved_cmd = await _resolve_env_vars_in_command(provider, vm_id, cfg.verification.command, creds_obj)
                     if resolved_cmd != cfg.verification.command:
-                        v_resolved = VerificationConfig(
-                            command=resolved_cmd,
-                            shell=cfg.verification.shell,
-                        )
-                sample_configs.append(
-                    SampleConfig(
-                        id=cfg.id, command=cfg.command, shell=cfg.shell,
-                        verification=v_resolved,
-                    )
-                )
+                        verification = VerificationConfig(command=resolved_cmd, shell=cfg.verification.shell)
+                sample_configs.append(SampleConfig(id=cfg.id, command=cfg.command, shell=cfg.shell, verification=verification))
+
             print(f"\n  从 CSV 读取 {len(sample_configs)} 个样本:")
             for cfg in sample_configs:
                 print(f"    [{cfg.shell.value}] {cfg.command}")
@@ -988,44 +998,177 @@ async def _interactive_csv(provider: VmwareProvider) -> None:
             print(f"  模式:     {mode.value}")
             capture_screenshot = input("  截取 VM 截图? [y/N]: ").strip().lower() == "y"
             if capture_screenshot:
-                print(f"  截图:     是")
-            confirm = input("  确认执行? [y/N]: ").strip().lower()
+                print("  截图:     是")
+            confirm = input(f"  确认{confirm_action}? [y/N]: ").strip().lower()
             if confirm == "b":
                 step = 4
                 continue
             if confirm != "y":
                 print("  已取消")
-                return
+                return None
 
-            sample_specs: list[SampleSpec] = []
-            for cfg in sample_configs:
-                v = cfg.verification
-                sample_specs.append(SampleSpec(
-                    id=cfg.id, command=cfg.command, shell=cfg.shell,
-                    verification=VerificationSpec(command=v.command, shell=v.shell),
-                ))
+            sample_specs = tuple(
+                SampleSpec(
+                    id=cfg.id,
+                    command=cfg.command,
+                    shell=cfg.shell,
+                    verification=VerificationSpec(command=cfg.verification.command, shell=cfg.verification.shell),
+                )
+                for cfg in sample_configs
+            )
             first_v = sample_specs[0].verification
-            test_case = TestCase(
-                vm_id=vm_id, snapshot=snapshot, mode=mode,
+            return TestCase(
+                vm_id=vm_id,
+                snapshot=snapshot,
+                mode=mode,
                 sample_command=sample_configs[0].command,
                 sample_shell=sample_configs[0].shell,
                 verify_command=first_v.command if first_v else "",
                 verify_shell=first_v.shell if first_v else Shell.POWERSHELL,
                 credentials=GuestCredentials(guest_user, guest_password),
-                samples=tuple(sample_specs),
+                samples=sample_specs,
                 verification=first_v or VerificationSpec(command="", shell=Shell.POWERSHELL),
                 capture_screenshot=capture_screenshot,
                 normalize_ignore_patterns=load_default_ignore_patterns(),
             )
-            orch = TestOrchestrator(provider, Path("reports"), progress=print_progress)
-            try:
-                reset_progress()
-                batch_result = await orch.run_batch(test_case)
-            except VmToolsNotReadyError:
-                return
-            print_batch_summary(batch_result, indent="    ")
-            print_batch_report_paths(batch_result.report_dir, indent="    ")
+
+
+async def _interactive_plan_menu(provider: VmwareProvider) -> None:
+    tasks: list[PlanTask] = []
+    next_task_number = 1
+    while True:
+        print("\n  —— 计划任务 ——")
+        print("  [0] 返回主菜单")
+        print("  [1] 添加单样本测试")
+        print("  [2] 添加多样本测试 (CSV)")
+        print("  [3] 查看任务列表")
+        print("  [4] 删除任务")
+        print("  [5] 清空任务")
+        print("  [6] 一键按顺序执行")
+        choice = input("\n  > ").strip()
+
+        if choice == "0":
             return
+        if choice == "1":
+            test_case = await _build_interactive_single_test_case(provider, confirm_action="添加到计划任务")
+            if test_case is None:
+                continue
+            repeat_count = _prompt_repeat_count()
+            tasks.append(PlanTask(f"task-{next_task_number}", PlanTaskKind.SINGLE, test_case, repeat_count))
+            next_task_number += 1
+            print("  已添加计划任务")
+            continue
+        if choice == "2":
+            test_case = await _build_interactive_csv_test_case(provider, confirm_action="添加到计划任务")
+            if test_case is None:
+                continue
+            repeat_count = _prompt_repeat_count()
+            tasks.append(PlanTask(f"task-{next_task_number}", PlanTaskKind.BATCH, test_case, repeat_count))
+            next_task_number += 1
+            print("  已添加计划任务")
+            continue
+        if choice == "3":
+            _print_plan_tasks(tasks)
+            continue
+        if choice == "4":
+            _delete_plan_task(tasks)
+            continue
+        if choice == "5":
+            tasks.clear()
+            print("  已清空计划任务")
+            continue
+        if choice == "6":
+            await _run_interactive_plan(provider, tasks)
+            continue
+        print("  无效选项")
+
+
+def _prompt_repeat_count() -> int:
+    while True:
+        value = input("  重复执行次数 [1]: ").strip()
+        if not value:
+            return 1
+        try:
+            repeat_count = int(value)
+        except ValueError:
+            print("  请输入正整数")
+            continue
+        if repeat_count < 1:
+            print("  请输入正整数")
+            continue
+        if repeat_count > PLAN_REPEAT_COUNT_MAX:
+            print(f"  重复次数不能超过 {PLAN_REPEAT_COUNT_MAX}")
+            continue
+        return repeat_count
+
+
+def _print_plan_tasks(tasks: Sequence[PlanTask]) -> None:
+    if not tasks:
+        print("  暂无计划任务")
+        return
+    print("\n  当前计划任务:")
+    for index, task in enumerate(tasks, start=1):
+        print(f"  [{index}] {_format_plan_task(task)}")
+
+
+def _format_plan_task(task: PlanTask) -> str:
+    test_case = task.test_case
+    kind = "单样本" if task.kind == PlanTaskKind.SINGLE else "多样本"
+    sample_count = len(test_case.effective_samples())
+    sample_text = test_case.sample_command if task.kind == PlanTaskKind.SINGLE else f"{sample_count} 个样本"
+    return (
+        f"{task.id} {kind} x{task.repeat_count} | "
+        f"VM={test_case.vm_id} | 快照={test_case.snapshot or '(无)'} | "
+        f"模式={test_case.mode.value} | {sample_text}"
+    )
+
+
+def _delete_plan_task(tasks: list[PlanTask]) -> None:
+    if not tasks:
+        print("  暂无计划任务")
+        return
+    _print_plan_tasks(tasks)
+    value = input("  删除序号: ").strip()
+    try:
+        index = int(value)
+    except ValueError:
+        print("  请输入有效序号")
+        return
+    if index < 1 or index > len(tasks):
+        print("  序号超出范围")
+        return
+    removed = tasks.pop(index - 1)
+    print(f"  已删除 {removed.id}")
+
+
+async def _run_interactive_plan(provider: VmwareProvider, tasks: Sequence[PlanTask]) -> None:
+    if not tasks:
+        print("  暂无计划任务")
+        return
+    _print_plan_tasks(tasks)
+    confirm = input("  确认按顺序执行? [y/N]: ").strip().lower()
+    if confirm != "y":
+        print("  已取消")
+        return
+    orch = TestOrchestrator(provider, Path("reports"), progress=print_progress)
+    try:
+        reset_progress()
+        results = await orch.run_plan(tasks)
+    except VmToolsNotReadyError:
+        return
+    _print_plan_results(results)
+
+
+def _print_plan_results(results: Sequence[PlanRunResult]) -> None:
+    print("\n  计划任务执行完成:")
+    for result in results:
+        report_dir = result.result.report_dir
+        print(f"  - {result.task.id} #{result.iteration}: {report_dir}")
+        if isinstance(result.result, BatchTestResult):
+            print_batch_summary(result.result, indent="    ")
+            print_batch_report_paths(report_dir, indent="    ")
+        elif isinstance(result.result, TestResult):
+            print(f"    报告: {report_dir}")
 
 
 async def _interactive_setup(env_file: Path) -> None:

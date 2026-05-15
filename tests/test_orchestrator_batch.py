@@ -5,7 +5,7 @@ import json
 import pytest
 
 from conftest import FakeProvider
-from vm_auto_test.models import Classification, GuestCredentials, SampleSpec, TestCase, TestMode
+from vm_auto_test.models import Classification, GuestCredentials, PlanTask, PlanTaskKind, SampleSpec, TestCase, TestMode
 from vm_auto_test.orchestrator import TestOrchestrator
 
 
@@ -44,6 +44,89 @@ async def test_run_batch_executes_each_sample_with_isolated_snapshot(tmp_path):
         "verify",
         "two.exe",
         "verify",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_run_plan_executes_tasks_in_order_and_honors_repeat_count(tmp_path):
+    provider = FakeProvider(outputs=[
+        "before-single-1", "sample-single-1", "after-single-1",
+        "before-single-2", "sample-single-2", "after-single-2",
+        "before-batch", "sample-batch", "after-batch",
+    ])
+    single_case = TestCase(
+        vm_id="vm1",
+        snapshot="clean",
+        mode=TestMode.BASELINE,
+        sample_command="single.exe",
+        verify_command="verify-single",
+        credentials=GuestCredentials("user", "pass"),
+    )
+    batch_case = TestCase(
+        vm_id="vm1",
+        snapshot="clean",
+        mode=TestMode.BASELINE,
+        sample_command="legacy.exe",
+        verify_command="verify-batch",
+        credentials=GuestCredentials("user", "pass"),
+        samples=(SampleSpec(id="one", command="batch-one.exe"),),
+    )
+
+    results = await TestOrchestrator(provider, tmp_path).run_plan((
+        PlanTask(id="task-1", kind=PlanTaskKind.SINGLE, test_case=single_case, repeat_count=2),
+        PlanTask(id="task-2", kind=PlanTaskKind.BATCH, test_case=batch_case),
+    ))
+
+    assert [(result.task.id, result.iteration) for result in results] == [
+        ("task-1", 1),
+        ("task-1", 2),
+        ("task-2", 1),
+    ]
+    assert provider.commands == [
+        "revert:clean", "start", "wait", "verify-single", "single.exe", "verify-single",
+        "revert:clean", "start", "wait", "verify-single", "single.exe", "verify-single",
+        "revert:clean", "start", "wait", "verify-batch", "batch-one.exe", "verify-batch",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_run_plan_rejects_repeat_count_outside_allowed_range(tmp_path):
+    test_case = TestCase(
+        vm_id="vm1",
+        snapshot="clean",
+        mode=TestMode.BASELINE,
+        sample_command="single.exe",
+        verify_command="verify",
+        credentials=GuestCredentials("user", "pass"),
+    )
+
+    for repeat_count in (0, 101):
+        with pytest.raises(ValueError, match="repeat_count"):
+            await TestOrchestrator(FakeProvider(), tmp_path).run_plan((
+                PlanTask(id="task-1", kind=PlanTaskKind.SINGLE, test_case=test_case, repeat_count=repeat_count),
+            ))
+
+
+@pytest.mark.asyncio
+async def test_run_plan_emits_failed_event_when_task_fails(tmp_path):
+    test_case = TestCase(
+        vm_id="vm1",
+        snapshot="clean",
+        mode=TestMode.BASELINE,
+        sample_command="single.exe",
+        verify_command="verify",
+        credentials=GuestCredentials("user", "pass"),
+    )
+    events = []
+
+    with pytest.raises(ValueError):
+        await TestOrchestrator(FakeProvider(), tmp_path, progress=events.append).run_plan((
+            PlanTask(id="task-1", kind="unknown", test_case=test_case),
+        ))
+
+    assert [(event.status, event.detail) for event in events if event.name == "plan_task"] == [
+        ("started", "task-1 #1"),
+        ("failed", "task-1 #1: ValueError"),
     ]
 
 

@@ -9,6 +9,7 @@
 | 能力 | 入口 |
 |------|------|
 | 单样本验证 | `run` 或交互菜单 `[1]` |
+| 计划任务 | 交互菜单 `[5]` 添加单测/CSV 批量任务后按顺序执行 |
 | 批量目录 | `run-dir` 扫描目录批量运行 |
 | CSV 批量 | `run-csv` 每样本独立验证命令 |
 | YAML 配置 | `init-config` / `config validate` / `run --config` |
@@ -44,6 +45,8 @@ vm-auto-test run --config configs/baseline.yaml
 # 从已有 JSON 生成独立 HTML 报告
 vm-auto-test report --input reports/latest/result.json --output reports/latest/report.html
 ```
+
+交互菜单中的 `[5] 计划任务` 是本次会话内的内存队列：可添加单样本测试或 CSV 多样本测试，设置重复执行次数，然后一键按加入顺序执行；不会创建后台定时器，也不会持久化任务。
 
 环境未配置时首次运行会进入引导，也可手动创建 `.env`：
 
@@ -168,6 +171,24 @@ vm-auto-test run-csv --vm "<vmx>" --mode baseline --snapshot "clean-snapshot" \
 | `test.bat` | `schtasks /query` | `powershell` |
 
 第一列以 `sample` 开头时自动识别为表头。相对路径需配合 `--samples-base-dir`。
+
+## 计划任务（交互菜单）
+
+在 `vm-auto-test` 交互菜单选择 `[5] 计划任务`，可以先把多个测试加入本次会话的内存队列，再一键按顺序执行。
+
+计划任务支持：
+
+- 添加单样本测试：复用交互菜单 `[1]` 的参数收集流程。
+- 添加 CSV 多样本测试：复用交互菜单 `[2]` 的参数收集流程。
+- 为每个计划项设置重复执行次数，默认 `1`，最大 `100`。
+- 查看、删除、清空当前队列。
+- 一键顺序执行：单样本计划项调用单样本执行流程，多样本计划项调用批量执行流程。
+
+注意：
+
+- 计划任务不会持久化，退出当前交互会话后队列即消失。
+- 计划任务不是后台定时器，也不会创建 cron/系统计划任务。
+- 每个计划项仍按现有执行流程生成报告，并遵守快照回滚、Guest 凭据、安全边界和密码不打印规则。
 
 ## YAML 配置（推荐）
 

@@ -22,6 +22,11 @@ class Shell(str, Enum):
     POWERSHELL = "powershell"
 
 
+class PlanTaskKind(str, Enum):
+    SINGLE = "single"
+    BATCH = "batch"
+
+
 class ComparisonKind(str, Enum):
     CHANGED = "changed"
     CONTAINS = "contains"
@@ -31,6 +36,7 @@ class ComparisonKind(str, Enum):
 
 
 ComparisonTarget = Literal["before", "after"]
+PLAN_REPEAT_COUNT_MAX = 100
 
 
 @dataclass(frozen=True)
@@ -198,3 +204,18 @@ class BatchTestResult:
     classification: Classification
     steps: tuple[StepResult, ...] = field(default_factory=tuple)
     duration_seconds: float = 0.0
+
+
+@dataclass(frozen=True)
+class PlanTask:
+    id: str
+    kind: PlanTaskKind
+    test_case: TestCase
+    repeat_count: int = 1
+
+
+@dataclass(frozen=True)
+class PlanRunResult:
+    task: PlanTask
+    iteration: int
+    result: TestResult | BatchTestResult

@@ -6,6 +6,7 @@ from typing import Any
 import pytest
 
 from vm_auto_test import cli
+from vm_auto_test.models import BatchTestResult, Classification, CommandResult, EvaluationResult, GuestCredentials, SampleTestResult
 
 
 VALID_CONFIG = """
@@ -207,3 +208,111 @@ def test_doctor_reports_invalid_config_without_printing_password(monkeypatch, tm
     assert exit_code == 3
     assert "[FAIL] Config" in captured.out
     assert "super-secret" not in captured.out
+
+
+@pytest.mark.asyncio
+async def test_interactive_plan_menu_enqueues_and_runs_single_task(monkeypatch, capsys):
+    test_case = _make_test_case("single.exe")
+    seen = {}
+
+    class FakeOrchestrator:
+        def __init__(self, provider, reports_dir, progress=None):
+            seen["reports_dir"] = reports_dir
+
+        async def run_plan(self, tasks):
+            seen["tasks"] = tasks
+            return ()
+
+    inputs = iter(["1", "3", "6", "y", "0"])
+    monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+    monkeypatch.setattr(cli, "_build_interactive_single_test_case", _async_return(test_case))
+    monkeypatch.setattr(cli, "TestOrchestrator", FakeOrchestrator)
+
+    await cli._interactive_plan_menu(provider=object())
+
+    captured = capsys.readouterr()
+    assert "task-1 单样本 x3" in captured.out
+    assert "secret" not in captured.out
+    assert len(seen["tasks"]) == 1
+    assert seen["tasks"][0].repeat_count == 3
+    assert seen["tasks"][0].test_case is test_case
+
+
+@pytest.mark.asyncio
+async def test_interactive_plan_menu_enqueues_csv_task(monkeypatch, capsys):
+    test_case = _make_batch_test_case()
+    seen = {}
+
+    class FakeOrchestrator:
+        def __init__(self, provider, reports_dir, progress=None):
+            pass
+
+        async def run_plan(self, tasks):
+            seen["tasks"] = tasks
+            return (_make_batch_plan_result(tasks[0]),)
+
+    inputs = iter(["2", "", "6", "y", "0"])
+    monkeypatch.setattr("builtins.input", lambda _: next(inputs))
+    monkeypatch.setattr(cli, "_build_interactive_csv_test_case", _async_return(test_case))
+    monkeypatch.setattr(cli, "TestOrchestrator", FakeOrchestrator)
+
+    await cli._interactive_plan_menu(provider=object())
+
+    captured = capsys.readouterr()
+    assert "task-1 多样本 x1" in captured.out
+    assert "2 个样本" in captured.out
+    assert len(seen["tasks"]) == 1
+    assert seen["tasks"][0].kind.value == "batch"
+
+
+def _async_return(value):
+    async def wrapper(*args, **kwargs):
+        return value
+
+    return wrapper
+
+
+def _make_test_case(sample_command):
+    return cli.TestCase(
+        vm_id="vm1",
+        snapshot="clean",
+        mode=cli.TestMode.BASELINE,
+        sample_command=sample_command,
+        verify_command="verify",
+        credentials=GuestCredentials("user", "secret"),
+    )
+
+
+def _make_batch_test_case():
+    return cli.TestCase(
+        vm_id="vm1",
+        snapshot="clean",
+        mode=cli.TestMode.BASELINE,
+        sample_command="one.exe",
+        verify_command="verify",
+        credentials=GuestCredentials("user", "secret"),
+        samples=(
+            cli.SampleSpec(id="one", command="one.exe"),
+            cli.SampleSpec(id="two", command="two.exe"),
+        ),
+    )
+
+
+def _make_batch_plan_result(task):
+    sample_result = SampleTestResult(
+        test_case=task.test_case,
+        sample_spec=task.test_case.samples[0],
+        report_dir="reports/sample",
+        before=CommandResult(command="verify"),
+        sample=CommandResult(command="one.exe"),
+        after=CommandResult(command="verify", stdout="changed"),
+        evaluation=EvaluationResult(changed=True, effect_observed=True),
+        classification=Classification.BASELINE_VALID,
+    )
+    batch_result = BatchTestResult(
+        test_case=task.test_case,
+        report_dir="reports/batch",
+        samples=(sample_result,),
+        classification=Classification.BASELINE_VALID,
+    )
+    return cli.PlanRunResult(task=task, iteration=1, result=batch_result)

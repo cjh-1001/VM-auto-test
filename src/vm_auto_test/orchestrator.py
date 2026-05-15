@@ -7,6 +7,7 @@ import time
 from collections.abc import Awaitable, Callable
 from datetime import datetime
 from pathlib import Path
+from collections.abc import Sequence
 from typing import TypeVar
 
 from vm_auto_test.av_detection import build_detection_command, parse_detection_result
@@ -17,6 +18,10 @@ from vm_auto_test.models import (
     Classification,
     CommandResult,
     EvaluationResult,
+    PLAN_REPEAT_COUNT_MAX,
+    PlanRunResult,
+    PlanTask,
+    PlanTaskKind,
     SampleSpec,
     SampleTestResult,
     Shell,
@@ -314,6 +319,31 @@ class TestOrchestrator:
             str(report_dir),
         )
         return result
+
+    async def run_plan(self, tasks: Sequence[PlanTask]) -> tuple[PlanRunResult, ...]:
+        results: list[PlanRunResult] = []
+        for task in tasks:
+            if task.repeat_count < 1 or task.repeat_count > PLAN_REPEAT_COUNT_MAX:
+                raise ValueError(f"repeat_count must be between 1 and {PLAN_REPEAT_COUNT_MAX}")
+            for iteration in range(1, task.repeat_count + 1):
+                detail = f"{task.id} #{iteration}"
+                self._log_path = None
+                self._emit("plan_task", "started", detail)
+                try:
+                    if task.kind == PlanTaskKind.SINGLE:
+                        result = await self.run(task.test_case)
+                    elif task.kind == PlanTaskKind.BATCH:
+                        result = await self.run_batch(task.test_case)
+                    else:
+                        raise ValueError(f"Unsupported plan task kind: {task.kind}")
+                except Exception as exc:
+                    self._log_path = None
+                    self._emit("plan_task", "failed", f"{detail}: {type(exc).__name__}")
+                    raise
+                self._log_path = None
+                results.append(PlanRunResult(task=task, iteration=iteration, result=result))
+                self._emit("plan_task", "passed", detail)
+        return tuple(results)
 
     async def run_batch(self, test_case: TestCase) -> BatchTestResult:
         self._validate_test_case(test_case)
