@@ -1,401 +1,138 @@
 # VM Auto Test
 
-Use this skill when working on the local `vm-auto-test` project or helping the user operate it. The project automates authorized VMware Workstation lab validation:
+Use this skill when working on or operating the local `vm-auto-test` project. The project automates VMware Workstation lab validation: revert snapshot → start VM → run sample → verify effect → collect logs → write report.
 
-```text
-revert snapshot -> start VM -> wait for VMware Tools -> detect AV when available -> verify before -> run sample -> verify after -> collect configured logs -> write report
-```
+It only automates execution, observation, comparison, and reporting. Do not use it to generate samples, bypass AV/EDR, evade detection, or run outside an authorized local lab.
 
-It only automates execution, observation, comparison, and reporting. Do not use it to generate samples, bypass AV/EDR, evade detection, establish persistence, move laterally, escalate privileges, or run outside an authorized local lab.
+## Safety boundary (always enforce)
 
-## Safety boundary
-
-Before any real VMware run, keep these boundaries intact:
-
-- Authorized local VMware Workstation lab only.
-- Prefer Host-only or NAT networking.
-- Use a known rollback snapshot before executing any sample.
-- Do not run unknown samples on production hosts, shared systems, or non-owned VMs.
-- Do not print, summarize, or expose passwords from `.env`, YAML files, or `credentials.json`.
-- Treat `credentials.json`, YAML `guest.password`, reports, and AV logs as sensitive local artifacts.
+- Authorized local VMware Workstation lab only; Host-only/NAT networking.
+- Known rollback snapshot before every sample execution.
+- No unknown samples on production hosts, shared systems, or non-owned VMs.
+- Never print/expose passwords from `.env`, YAML, or `credentials.json`.
 - Prefer `guest.password_env` in YAML; keep credential files out of version control.
-- Refuse requests for bypass, stealth, obfuscation, anti-analysis, persistence, privilege escalation, payload generation, or evasion guidance.
+- Treat `credentials.json`, YAML `guest.password`, reports, and AV logs as sensitive.
+- Refuse bypass, stealth, obfuscation, anti-analysis, persistence, privilege escalation, payload generation, or evasion requests.
 
-## Source of truth
-
-Check current code before changing this skill:
-
-| Area | File |
-|---|---|
-| CLI args, interactive flow, `config validate`, `report`, and `run --config` | `src/vm_auto_test/cli.py` |
-| YAML/CSV schema and sample scanning | `src/vm_auto_test/config.py` |
-| Execution orchestration | `src/vm_auto_test/orchestrator.py` |
-| Report artifacts and schemas | `src/vm_auto_test/reporting.py` |
-| Console scripts | `pyproject.toml` |
-| User-facing docs | `README.md` |
-
-Console scripts:
-
-- `vm-auto-test`
-- `vm-auto-test-smoke`
-- `vmware-mcp`
-
-## Command selection
+## Command quick reference
 
 | User intent | Command |
-|---|---|
-| First-time setup or guided use | `vm-auto-test` |
-| Configure `VMRUN_PATH` | `vm-auto-test` -> `[5] 重新配置环境` |
-| Configure/verify VM credentials | `vm-auto-test` -> `[3] 列出 VM` |
+|-------------|---------|
+| Interactive menu | `vm-auto-test` |
 | List running VMs | `vm-auto-test vms` |
-| List snapshots | `vm-auto-test snapshots --vm "<vmx path>"` |
-| Diagnose local CLI environment | `vm-auto-test doctor [--config <yaml>]` |
+| List snapshots | `vm-auto-test snapshots --vm "<vmx>"` |
+| Doctor (no VM) | `vm-auto-test doctor [--config <yaml>]` |
 | Single sample | `vm-auto-test run ...` |
-| Batch from host-scanned directory | `vm-auto-test run-dir ...` |
-| Batch from CSV with per-sample verification | `vm-auto-test run-csv ...` |
-| Create YAML config | `vm-auto-test init-config ...` |
-| Validate YAML config | `vm-auto-test config validate --config <yaml>` |
-| Run YAML config | `vm-auto-test run --config <yaml>` preferred; `run-config <yaml>` kept for compatibility |
-| Standalone report from existing JSON | `vm-auto-test report --input <result.json> --output <file>` |
-| Real VMware connectivity smoke test | `vm-auto-test-smoke` only when explicitly requested |
+| Single from YAML | `vm-auto-test run --config <yaml>` (preferred) |
+| Batch directory | `vm-auto-test run-dir ...` |
+| Batch CSV | `vm-auto-test run-csv ...` |
+| Create YAML | `vm-auto-test init-config --output <yaml> --mode baseline\|av` |
+| Validate YAML | `vm-auto-test config validate --config <yaml>` |
+| Report from JSON | `vm-auto-test report --input <json> --output <file>` |
+| Real VMware smoke | `vm-auto-test-smoke` (only when explicitly requested) |
 
-If details are incomplete, prefer the interactive menu instead of guessing paths, credentials, snapshots, or verification commands.
+`--env-file` is a top-level arg: `vm-auto-test --env-file .env <command>`.
 
-`run --config` is the recommended config-driven entrypoint. Do not mix it with direct `run` flags like `--vm`, `--mode`, `--sample-command`, or `--reports-dir`; the CLI rejects mixed usage.
+Console scripts: `vm-auto-test`, `vm-auto-test-smoke`, `vmware-mcp`.
 
-Before a non-interactive real run, prefer `vm-auto-test doctor --config <yaml>` to catch local setup issues without touching VMware or running guest commands.
+## Key constraints
 
-`--env-file` is a top-level argument:
-
-```bash
-vm-auto-test --env-file .env <command>
-```
+- `run --config` is the recommended config entrypoint. Do NOT mix with direct flags (`--vm`, `--mode`, `--sample-command`, `--reports-dir`); CLI rejects mixed usage.
+- Before non-interactive real runs, prefer `vm-auto-test doctor --config <yaml>` first.
+- Interactive menu: `[0] 退出` `[1] 测试单样本` `[2] 测试多样本 (CSV)` `[3] 列出 VM` `[4] 列出快照` `[5] 重新配置环境`
 
 ## Real-run preflight
 
-Confirm or ask for:
-
-1. `vmrun.exe` is installed and `VMRUN_PATH` is configured.
-2. Target VM is a `.vmx` path or appears in `vm-auto-test vms`.
-3. VMware Tools is installed and ready.
-4. VMware access-control encryption is disabled.
-5. Guest credentials are for a local administrator account, not a Microsoft online account.
-6. The credential user has logged into the VM desktop at least once.
-7. The selected snapshot is safe to revert to.
-8. The sample command is valid inside the guest VM.
-9. The verification command observes a safe, real effect.
-10. Commands do not print secrets that would be persisted into reports.
-
-## Common workflows
-
-### Interactive
-
-```bash
-vm-auto-test
-```
-
-Menu:
-
-```text
-[0] 退出
-[1] 测试单样本
-[2] 测试多样本 (CSV)
-[3] 列出 VM
-[4] 列出快照
-[5] 重新配置环境
-```
-
-Interactive single-sample and CSV flows can prompt for screenshots. Screenshots are saved as `screenshot.png` in the relevant report directory.
-
-### Doctor preflight
-
-```bash
-vm-auto-test doctor
-vm-auto-test doctor --config configs/baseline.yaml --reports-dir reports
-```
-
-Doctor checks Python, package metadata, `VMRUN_PATH`, optional YAML config parsing, and report directory writability. It returns `3` on failed checks, does not connect to VMware, and must not print secrets from config files.
-
-### Discover VM and snapshots
-
-```bash
-vm-auto-test vms
-vm-auto-test snapshots --vm "E:\VM-MCP\windows11\Windows 11 x64.vmx"
-```
-
-If snapshot listing times out or fails, first suspect VM access-control encryption or an invalid `.vmx` path.
-
-### Single baseline run
-
-Baseline mode proves whether the sample creates the expected observable effect in a clean snapshot:
-
-```bash
-vm-auto-test run \
-  --vm "E:\VM-MCP\windows11\Windows 11 x64.vmx" \
-  --mode baseline \
-  --snapshot "clean-snapshot" \
-  --sample-command "C:\Samples\sample.exe" \
-  --sample-shell cmd \
-  --verify-command "hostname" \
-  --verify-shell powershell \
-  --capture-screenshot \
-  --reports-dir reports
-```
-
-`hostname` is only a harmless smoke example. Real validations should use a verification command that observes the intended effect.
-
-### Single AV run
-
-AV mode can run independently in an AV-installed snapshot. If a prior `BASELINE_VALID` report exists, pass it as optional reference metadata:
-
-```bash
-vm-auto-test run \
-  --vm "E:\VM-MCP\windows11\Windows 11 x64.vmx" \
-  --mode av \
-  --snapshot "av-installed" \
-  --sample-command "C:\Samples\sample.exe" \
-  --sample-shell cmd \
-  --verify-command "hostname" \
-  --verify-shell powershell \
-  --baseline-result "reports/20260509-120000-000000-sample/result.json" \
-  --reports-dir reports
-```
-
-`--baseline-result` is optional reference metadata, not a hard prerequisite. AV mode also runs a non-fatal best-effort known-AV process check; do not use detection output to tailor bypass behavior.
-
-### Directory batch
-
-Use when multiple sample files share one verification command:
-
-```bash
-vm-auto-test run-dir \
-  --vm "E:\VM-MCP\windows11\Windows 11 x64.vmx" \
-  --mode baseline \
-  --snapshot "clean-snapshot" \
-  --dir "C:\Samples" \
-  --pattern "*.exe" \
-  --verify-command "hostname" \
-  --verify-shell powershell \
-  --reports-dir reports
-```
-
-`run-dir` scans `--dir` on the host running the CLI, then uses each discovered path as the guest sample command. Use it only when those paths are also valid inside the guest, such as shared or mirrored paths. Otherwise use CSV and provide explicit guest paths.
-
-Default patterns when omitted: `*.exe`, `*.bat`, `*.ps1`, `*.cmd`. PowerShell scripts run with PowerShell; the others use `cmd`.
-
-### CSV batch
-
-Use when samples have their own verification commands:
-
-```bash
-vm-auto-test run-csv \
-  --vm "E:\VM-MCP\windows11\Windows 11 x64.vmx" \
-  --mode baseline \
-  --snapshot "clean-snapshot" \
-  --csv samples.csv \
-  --samples-base-dir "C:\Samples" \
-  --reports-dir reports
-```
-
-CSV accepts UTF-8, UTF-8 BOM, or GBK. Header row is optional when the first column starts with `sample`.
-
-| sample_file | verify_command | verify_shell |
-|---|---|---|
-| `sample.exe` | `hostname` | `cmd` |
-| `test.bat` | `schtasks /query` | `powershell` |
-
-Relative `sample_file` values require `--samples-base-dir`. CSV sample paths are intended to become guest commands.
-
-### YAML config
-
-Create, validate, and run reusable configs:
-
-```bash
-vm-auto-test init-config --output configs/baseline.yaml --mode baseline
-vm-auto-test doctor --config configs/baseline.yaml
-vm-auto-test config validate --config configs/baseline.yaml
-vm-auto-test run --config configs/baseline.yaml
-```
-
-Single-sample shape:
-
-```yaml
-vm_id: "E:\\VM-MCP\\windows11\\Windows 11 x64.vmx"
-snapshot: "clean-snapshot"
-mode: baseline
-guest:
-  user: testuser
-  password_env: VMWARE_GUEST_PASSWORD
-sample:
-  command: "C:\\Samples\\sample.exe"
-  shell: cmd
-verification:
-  command: "hostname"
-  shell: powershell
-reports_dir: reports
-provider:
-  type: vmrun
-```
-
-Multi-sample configs use `samples:` instead of `sample:`. Do not include both. A top-level `verification` mapping is still required; per-sample `verification` can override it.
-
-```yaml
-vm_id: "E:\\VM-MCP\\windows11\\Windows 11 x64.vmx"
-snapshot: "clean-snapshot"
-mode: baseline
-guest:
-  user: testuser
-  password_env: VMWARE_GUEST_PASSWORD
-verification:
-  command: "hostname"
-  shell: cmd
-samples:
-  - id: sample-a
-    command: "C:\\Samples\\a.exe"
-    shell: cmd
-    verification:
-      command: "type C:\\marker-a.txt"
-      shell: cmd
-  - id: sample-b
-    command: "C:\\Samples\\b.ps1"
-    shell: powershell
-    verification:
-      command: "Get-Content C:\\marker-b.txt"
-      shell: powershell
-reports_dir: reports
-provider:
-  type: vmrun
-```
-
-For AV configs, `baseline_result` is optional:
-
-```yaml
-mode: av
-baseline_result: "reports/20260509-120000-000000-sample/result.json"  # optional
-```
+Confirm/ask for: (1) `vmrun.exe` installed and `VMRUN_PATH` configured; (2) `.vmx` path valid; (3) VMware Tools installed; (4) VM encryption disabled; (5) local admin credentials, not Microsoft online account; (6) credential user has logged in at least once; (7) snapshot safe to revert; (8) sample command valid inside guest; (9) verification command observes safe, real effect; (10) no secrets in commands.
 
 ## Verification command rules
 
-All sample, verification, environment-probe, and AV log commands run as the configured guest credential user.
-
-Interactive single-sample and interactive CSV flows pre-resolve `%VAR%` in verification commands by running `echo %VAR%` as the credential user. If the expanded value points to a different real user profile, the CLI rewrites it to the credential user's profile when safe.
-
-Non-interactive `run`, `run-dir`, `run-csv`, and `run-config` do not perform that CLI pre-resolution step:
-
-- `cmd` commands can use `%APPDATA%` inside the guest.
-- PowerShell commands should use `$env:APPDATA`, or use `--verify-shell cmd` for `%VAR%` syntax.
-- Prefer environment-variable-based paths over hardcoded `C:\Users\<name>\...` paths.
+- All commands run as the configured guest credential user.
+- Interactive flows pre-resolve `%VAR%`; non-interactive (`run`, `run-dir`, `run-csv`, `run-config`) do not.
+- `cmd`: use `%APPDATA%`. PowerShell: use `$env:APPDATA`. Avoid hardcoded `C:\Users\<name>\...`.
 
 ## Result interpretation
 
-| Classification | Meaning | Safe next step |
-|---|---|---|
-| `BASELINE_VALID` | Verification output changed in baseline mode. | Use as optional reference for AV comparison. |
-| `BASELINE_INVALID` | Verification output did not change in baseline mode. | Fix sample path, permissions, timeout, or verification command. |
-| `AV_NOT_BLOCKED` | In AV mode, the effect still occurred. | Keep report for defensive analysis; do not pivot to evasion. |
-| `AV_BLOCKED_OR_NO_CHANGE` | In AV mode, no effect was observed. | Check reports and configured logs to distinguish blocking from sample failure. |
+| Classification | Meaning | Action |
+|----------------|---------|--------|
+| `BASELINE_VALID` | Effect observed in baseline | Use as optional AV reference |
+| `BASELINE_INVALID` | No effect in baseline | Fix sample path, permissions, or verification |
+| `AV_NOT_BLOCKED` | Effect still occurred under AV | Keep for defensive analysis; do not pivot to evasion |
+| `AV_BLOCKED_OR_NO_CHANGE` | No effect under AV | Distinguish blocking vs sample failure via reports/logs |
 
-Reports are written under `reports/` unless overridden.
+## Report structures
 
-Single run:
+Single run: `reports/<timestamp>-<sample>/` → `result.json` (schema 1), `before.txt`, `after.txt`, `sample_stdout.txt`, `sample_stderr.txt`, `test.log`, optional `screenshot.png`, optional `av_logs/`.
 
-```text
-reports/<timestamp>-<sample>/
-  result.json            schema_version: 1
-  before.txt
-  after.txt
-  sample_stdout.txt
-  sample_stderr.txt
-  test.log
-  screenshot.png         optional
-  av_logs/               optional
-```
+Batch run: `reports/<timestamp>-batch/` → `result.json` (schema 2), `result.csv` (UTF-8 BOM), `result.html` (interactive dashboard), `test.log`, `samples/<id>/` per-sample artifacts.
 
-Batch run:
+`vm-auto-test report` reads existing JSON and emits standalone HTML or formatted JSON (default `--format html`).
 
-```text
-reports/<timestamp>-batch/
-  result.json            schema_version: 2
-  result.csv             UTF-8 BOM, Excel-friendly, formula guarded
-  result.html            static summary page
-  test.log
-  samples/<sample_id>/
-    result.json          schema_version: 2
-    before.txt
-    after.txt
-    sample_stdout.txt
-    sample_stderr.txt
-    screenshot.png       optional
-    av_logs/             optional
-```
+## Comparison strategies (YAML `verification.comparisons`)
 
-Batch `result.csv` has one row per sample. Batch `result.html` is the interactive batch summary generated by the normal batch run path and links to per-sample artifacts. All dynamic HTML values are escaped; CSV cells are guarded against common spreadsheet formula execution.
+| Type | Required field | Behavior |
+|------|---------------|----------|
+| `changed` (default) | — | Before/after output differs |
+| `contains` | `value` | Output contains string |
+| `regex` | `pattern` | Output matches regex |
+| `json_field` | `path`, `expected` | JSON field at dot-path equals expected |
+| `file_hash` | `expected` | Output SHA-256 equals expected |
 
-Report artifacts store verification output, sample stdout/stderr, and configured AV log output verbatim. Treat report directories as sensitive local evidence and avoid commands that print secrets.
+## YAML config shapes
 
-## Comparison strategies
+Single sample: `vm_id`, `snapshot`, `mode`, `guest.{user,password_env}`, `sample.{command,shell}`, `verification.{command,shell}`, `reports_dir`, `provider.{type:vmrun}`.
 
-Default behavior is `changed`: compare normalized before/after output.
+Multi-sample: use `samples:` array (not `sample:`). Top-level `verification` required; per-sample overrides supported.
 
-YAML `verification.comparisons` and per-sample `verification.comparisons` can use:
+AV optional: `baseline_result: "reports/<path>/result.json"`.
 
-| Type | Required field | Use |
-|---|---|---|
-| `changed` | none | Before/after output differs after normalization. |
-| `contains` | `value` | Output contains a string. |
-| `regex` | `pattern` | Output matches a regex. |
-| `json_field` | `path`, `expected` | JSON field at dot path equals expected value. |
-| `file_hash` | `expected` | Output SHA-256 equals expected value. |
+## AV detection & logs
 
-## AV detection and log collection
+AV mode performs non-fatal process-name detection: 腾讯电脑管家 (`QQPCTray.exe`), 360 (`360Tray.exe`), 火绒 (`HipsDaemon.exe`). Configured collectors run only explicit guest commands via `av_logs.collectors`. Do not invent vendor-specific collectors.
 
-In AV mode, the project attempts non-fatal best-effort process-name detection for known local AV products represented in `src/vm_auto_test/av_detection.py` (`腾讯电脑管家`, `360安全卫士`, `火绒安全软件`). Current detection checks one required process marker per known AV signature. It is reporting context only.
+## Screenshot behavior
 
-Configured AV log collectors run only explicit guest commands:
+When `--capture-screenshot` is enabled: the framework captures a screenshot 10 seconds after sample execution begins (parallel to sample run), plus a post-verification screenshot. Both go to `screenshot.png` in the report directory; the second overwrites the first if both succeed.
 
-```yaml
-av_logs:
-  collectors:
-    - id: app-events
-      type: guest_command
-      command: "Get-WinEvent -LogName Application -MaxEvents 20"
-      shell: powershell
-```
+## Troubleshooting quick reference
 
-`vm-auto-test report` reads existing JSON and emits a simple standalone HTML or formatted JSON file; it does not rebuild the full batch dashboard.
-
-Do not invent vendor-specific collectors unless the user provides the exact safe command.
-
-## Troubleshooting
-
-| Symptom | Likely cause | Safe action |
-|---|---|---|
-| Snapshot listing fails or times out | VM access-control encryption or wrong `.vmx` path | Ask user to disable encryption and verify VM path. |
-| `VmToolsNotReadyError` | VMware Tools missing, stopped, or guest not booted | Install/restart VMware Tools and retry. |
-| Repeated guest auth failures | Wrong local credentials, Microsoft online account, or user profile not initialized | Use local administrator credentials, log in once, then reconfigure. |
-| AV result is hard to interpret | No comparable baseline reference exists | Optionally run baseline first and pass its `result.json`; AV mode remains available without it. |
-| CSV parse error | Encoding, missing columns, relative sample without base dir, invalid shell, or missing CSV file | Save as UTF-8/GBK CSV with `sample_file,verify_command,verify_shell`; set `--samples-base-dir` for relative paths. |
-| `BASELINE_INVALID` | Verification does not observe the effect, wrong user profile, sample path invalid, or permissions issue | Choose a better verification command and ensure it targets the credential user's context. |
-| PowerShell verification with `%APPDATA%` fails in non-interactive CLI | `%VAR%` is cmd syntax and non-interactive CLI does not pre-resolve it | Use `$env:APPDATA` or run verification with `cmd`. |
-| `run-dir` finds files but guest execution fails | Host-scanned paths are not valid inside the guest | Use shared/mirrored paths or CSV with explicit guest paths. |
-| `detect_av` reports no known AV | AV not installed, process names differ, or unsupported product | Treat it as context only; use configured verification and logs. |
-| Screenshot missing | Screenshot capture failed or was not requested | Use `--capture-screenshot` or answer yes interactively; check step status in `result.json`. |
+| Symptom | Likely cause | Action |
+|---------|-------------|--------|
+| Snapshot listing fails | VM encryption or wrong `.vmx` | Disable encryption, verify path |
+| `VmToolsNotReadyError` | VMware Tools missing | Install/restart VMware Tools |
+| Guest auth failures | Wrong creds, online account, no profile | Local admin, log in once, reconfigure |
+| `BASELINE_INVALID` | Bad path/permissions/verification | Fix verification command for cred user context |
+| CSV parse error | Encoding/columns/path | UTF-8/GBK, `sample_file,verify_command,verify_shell` |
+| `%APPDATA%` in PS | cmd syntax | Use `$env:APPDATA` or `cmd` shell |
+| `run-dir` guest fail | Host path != guest path | Use shared paths or CSV |
+| Screenshot missing | Not requested or failed | `--capture-screenshot`, check `result.json` steps |
+| `run` missing args | Missing `--config` or direct args | Provide `--config <yaml>` or all direct args |
+| `run cannot combine` | Mixed `--config` + direct args | Choose one or the other |
+| `doctor` fails | Bad VMRUN_PATH/config/dir | Fix `.env` or config |
 
 ## Development checks
 
-When modifying Python code, run:
-
+When modifying Python code:
 ```bash
 pytest
 python -m compileall -q src tests
 ```
 
-The test suite uses fake providers and does not require VMware. `vm-auto-test-smoke` touches the real VMware setup and should only run when explicitly requested.
+Tests use fake providers (no VMware needed). `vm-auto-test-smoke` only when explicitly requested.
 
-When modifying only this skill document, Python tests are usually unnecessary. Instead verify:
+When modifying only this skill document, verify against source files instead of running tests:
+- CLI args → `src/vm_auto_test/cli.py`
+- YAML schema → `src/vm_auto_test/config.py`
+- Report artifacts → `src/vm_auto_test/reporting.py`
+- Safety boundary intact; no real credentials exposed.
 
-- Commands and arguments match `src/vm_auto_test/cli.py`.
-- YAML examples match `src/vm_auto_test/config.py`.
-- Report descriptions match `src/vm_auto_test/reporting.py`.
-- The safety boundary remains intact.
-- No real credentials, passwords, private samples, or sensitive local paths are exposed.
+## Source of truth
+
+| Area | File |
+|------|------|
+| CLI args, interactive flow, `config validate`, `report`, `run --config` | `src/vm_auto_test/cli.py` |
+| YAML/CSV schema, sample scanning | `src/vm_auto_test/config.py` |
+| Execution orchestration (incl. screenshot timing) | `src/vm_auto_test/orchestrator.py` |
+| Report artifacts and schemas | `src/vm_auto_test/reporting.py` |
+| Console scripts | `pyproject.toml` |
+| User-facing docs | `README.md` |

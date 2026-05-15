@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import time
@@ -35,6 +36,7 @@ from vm_auto_test.reporting import (
 
 _LOGGER = logging.getLogger(__name__)
 _SAMPLE_ID_PATTERN = re.compile(r"^[^\x00-\x1f/\\]{1,64}$")
+_SAMPLE_SCREENSHOT_DELAY_SECONDS = 10.0
 
 
 def _extract_sample_path(command: str) -> str | None:
@@ -217,12 +219,20 @@ class TestOrchestrator:
             after = before
         else:
             self._stage = "运行恶意脚本"
+            sample_started = asyncio.Event()
+            screenshot_task = self._create_sample_screenshot_task(test_case, report_dir, sample_started)
             sample = await self._run_sample_safe(
                 test_case,
                 test_case.sample_command,
                 test_case.sample_shell,
+                progress=self._sample_launch_progress(sample_started),
             )
+            if not sample_started.is_set():
+                sample_started.set()
+            screenshot_step = await screenshot_task if screenshot_task else None
             steps.append(StepResult("run_sample", sample.exit_code == 0 and "passed" or "failed", sample.capture_method, self._stage))
+            if screenshot_step:
+                steps.append(screenshot_step)
 
             self._stage = "验证攻击效果"
             after = await self._run_progress_step(
@@ -241,7 +251,7 @@ class TestOrchestrator:
             steps.append(StepResult("after_verification", "passed", after.capture_method, self._stage))
             self._emit_command_output("after_verification", after)
 
-        if test_case.capture_screenshot:
+        if test_case.capture_screenshot and not any(step.name == "capture_screenshot" for step in steps):
             self._stage = "验证攻击效果"
             report_dir.mkdir(parents=True, exist_ok=True)
             screenshot_path = str(report_dir / "screenshot.png")
@@ -398,8 +408,20 @@ class TestOrchestrator:
             after = before
         else:
             self._stage = "运行恶意脚本"
-            sample_result = await self._run_sample_safe(test_case, sample.command, sample.shell)
+            sample_started = asyncio.Event()
+            screenshot_task = self._create_sample_screenshot_task(test_case, report_dir, sample_started)
+            sample_result = await self._run_sample_safe(
+                test_case,
+                sample.command,
+                sample.shell,
+                progress=self._sample_launch_progress(sample_started),
+            )
+            if not sample_started.is_set():
+                sample_started.set()
+            screenshot_step = await screenshot_task if screenshot_task else None
             steps.append(StepResult("run_sample", sample_result.exit_code == 0 and "passed" or "failed", sample_result.capture_method, self._stage))
+            if screenshot_step:
+                steps.append(screenshot_step)
 
             self._stage = "验证攻击效果"
             after = await self._run_progress_step(
@@ -411,7 +433,7 @@ class TestOrchestrator:
             steps.append(StepResult("after_verification", "passed", after.capture_method, self._stage))
             self._emit_command_output("after_verification", after)
 
-        if test_case.capture_screenshot:
+        if test_case.capture_screenshot and not any(step.name == "capture_screenshot" for step in steps):
             self._stage = "验证攻击效果"
             report_dir.mkdir(parents=True, exist_ok=True)
             screenshot_path = str(report_dir / "screenshot.png")
@@ -549,7 +571,11 @@ class TestOrchestrator:
             self._emit(f"{step_name}_output", "info", output)
 
     async def _run_sample_safe(
-        self, test_case: TestCase, command: str, shell: Shell,
+        self,
+        test_case: TestCase,
+        command: str,
+        shell: Shell,
+        progress: ProgressCallback | None = None,
     ) -> CommandResult:
         try:
             return await self._run_progress_step(
@@ -558,7 +584,7 @@ class TestOrchestrator:
                 lambda: self._provider.run_guest_command(
                     test_case.vm_id, command, shell,
                     test_case.credentials, test_case.command_timeout_seconds,
-                    progress=self._emit_step,
+                    progress=progress or self._emit_step,
                 ),
                 lambda result: result.capture_method,
             )
@@ -567,6 +593,55 @@ class TestOrchestrator:
                 command=command, stdout="", stderr="", exit_code=-1,
                 capture_method="blocked_or_timeout",
             )
+
+    def _sample_launch_progress(self, sample_started: asyncio.Event) -> ProgressCallback:
+        def progress(step: StepResult) -> None:
+            if self._is_sample_execution_step(step):
+                sample_started.set()
+            self._emit_step(step)
+
+        return progress
+
+    def _is_sample_execution_step(self, step: StepResult) -> bool:
+        return step.name == "guest_script" and step.status == "started" and step.detail.casefold() in {
+            "executing",
+            "running",
+        }
+
+    def _create_sample_screenshot_task(
+        self,
+        test_case: TestCase,
+        report_dir: Path,
+        sample_started: asyncio.Event,
+    ) -> asyncio.Task[StepResult] | None:
+        if not test_case.capture_screenshot:
+            return None
+        return asyncio.create_task(self._capture_sample_screenshot(test_case, report_dir, sample_started))
+
+    async def _capture_sample_screenshot(
+        self,
+        test_case: TestCase,
+        report_dir: Path,
+        sample_started: asyncio.Event,
+    ) -> StepResult:
+        await sample_started.wait()
+        await asyncio.sleep(_SAMPLE_SCREENSHOT_DELAY_SECONDS)
+        report_dir.mkdir(parents=True, exist_ok=True)
+        screenshot_path = str(report_dir / "screenshot.png")
+        try:
+            await self._run_progress_step(
+                "capture_screenshot",
+                "screenshot",
+                lambda: self._provider.capture_screen(
+                    test_case.vm_id,
+                    screenshot_path,
+                    test_case.credentials,
+                ),
+                screenshot_path,
+            )
+            return StepResult("capture_screenshot", "passed", screenshot_path, self._stage)
+        except Exception as exc:
+            return StepResult("capture_screenshot", "failed", str(exc), self._stage)
 
     async def _verify_sample_on_guest(self, test_case: TestCase, sample_path: str) -> bool:
         try:

@@ -396,6 +396,58 @@ async def test_run_skips_sample_when_file_not_on_guest_with_screenshot(tmp_path)
     assert "capture_screen:" in str(provider.commands)
 
 
+@pytest.mark.asyncio
+async def test_capture_screenshot_after_sample_launch_before_sample_finishes(tmp_path, monkeypatch):
+    monkeypatch.setattr("vm_auto_test.orchestrator._SAMPLE_SCREENSHOT_DELAY_SECONDS", 0.0)
+
+    class BlockingSampleProvider(FakeProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            self._verification_outputs = ["missing", "present"]
+            self.sample_started = asyncio.Event()
+            self.screenshot_captured = asyncio.Event()
+
+        async def run_guest_command(
+            self,
+            vm_id: str,
+            command: str,
+            shell: Shell,
+            credentials: GuestCredentials,
+            timeout_seconds: int,
+            progress=None,
+        ) -> CommandResult:
+            self.commands.append(command)
+            if command == "C:\\Samples\\sample.exe":
+                if progress:
+                    progress(StepResult("guest_script", "started", "executing"))
+                self.sample_started.set()
+                await asyncio.wait_for(self.screenshot_captured.wait(), timeout=1.0)
+                return CommandResult(command=command, stdout="sample output")
+            return CommandResult(command=command, stdout=self._verification_outputs.pop(0))
+
+        async def capture_screen(self, vm_id: str, output_path: str, credentials: GuestCredentials) -> str:
+            assert self.sample_started.is_set()
+            self.commands.append(f"capture_screen:{output_path}")
+            self.screenshot_captured.set()
+            return output_path
+
+    provider = BlockingSampleProvider()
+    test_case = TestCase(
+        vm_id="vm1",
+        snapshot="clean",
+        mode=TestMode.BASELINE,
+        sample_command="C:\\Samples\\sample.exe",
+        verify_command="Get-Item C:\\marker.txt",
+        credentials=GuestCredentials("user", "pass"),
+        capture_screenshot=True,
+    )
+
+    result = await TestOrchestrator(provider, tmp_path).run(test_case)
+
+    assert result.sample.capture_method != "blocked_or_timeout"
+    assert provider.commands.index("capture_screen:" + str(Path(result.report_dir) / "screenshot.png")) < provider.commands.index("Get-Item C:\\marker.txt", 4)
+
+
 # -- script generation tests -------------------------------------------------
 
 
