@@ -60,6 +60,13 @@ class FakeProvider(VmwareProvider):
     async def file_exists_on_guest(self, vm_id: str, guest_path: str, credentials: GuestCredentials) -> bool:
         return self._file_exists
 
+    async def copy_file_from_guest(self, vm_id: str, guest_path: str, host_path: str, credentials: GuestCredentials) -> None:
+        self.commands.append(f"copy_from_guest:{guest_path}")
+
+    async def list_guest_directory(self, vm_id: str, guest_path: str, credentials: GuestCredentials) -> str:
+        self.commands.append(f"list_dir:{guest_path}")
+        return ""
+
 
 async def run_case(tmp_path, mode: TestMode, before: str, after: str, baseline_result: str | None = None):
     if mode == TestMode.AV:

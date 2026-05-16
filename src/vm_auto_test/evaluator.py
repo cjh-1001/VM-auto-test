@@ -64,6 +64,8 @@ def evaluate_output(
 def classify_result(effect_observed: bool, mode: TestMode) -> Classification:
     if mode == TestMode.BASELINE:
         return Classification.BASELINE_VALID if effect_observed else Classification.BASELINE_INVALID
+    if mode == TestMode.AV_ANALYZE:
+        return Classification.AV_ANALYZE_NOT_BLOCKED if effect_observed else Classification.AV_ANALYZE_BLOCKED
     return Classification.AV_NOT_BLOCKED if effect_observed else Classification.AV_BLOCKED_OR_NO_CHANGE
 
 

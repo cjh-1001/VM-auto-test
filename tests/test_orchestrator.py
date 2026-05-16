@@ -718,9 +718,9 @@ async def test_run_guest_command_cleans_all_guest_files_when_output_copy_fails()
 def test_build_detection_command_checks_all_signatures():
     cmd = build_detection_command()
 
-    assert "QQPCTray\\.exe" in cmd
-    assert "360Tray\\.exe" in cmd
-    assert "HipsDaemon\\.exe" in cmd
+    assert "QQPCTray" in cmd
+    assert "360Tray" in cmd
+    assert "HipsDaemon" in cmd
     assert "腾讯电脑管家" in cmd
     assert "360安全卫士" in cmd
     assert "火绒安全软件" in cmd
@@ -789,7 +789,7 @@ async def test_detect_av_failure_is_non_fatal(tmp_path):
     class FailingAvProvider(FakeProvider):
         async def run_guest_command(self, vm_id, command, shell, credentials, timeout_seconds, progress=None):
             self.commands.append(command)
-            if "tasklist" in command:
+            if "Get-Process" in command:
                 raise RuntimeError("detection failed")
             return CommandResult(command=command, stdout=self._outputs.pop(0))
 

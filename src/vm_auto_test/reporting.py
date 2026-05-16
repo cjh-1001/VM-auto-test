@@ -101,6 +101,7 @@ def to_report_dict(result: TestResult) -> dict[str, Any]:
         "comparisons": _comparison_dicts(evaluation),
         "av_logs": _log_dicts(result.logs),
         "steps": [asdict(step) for step in result.steps],
+        "av_analyze_result": _av_analyze_dict(result.av_analyze_result),
     }
 
 
@@ -127,6 +128,7 @@ def to_sample_report_dict(result: SampleTestResult) -> dict[str, Any]:
         "av_logs": _log_dicts(result.logs),
         "steps": [asdict(step) for step in result.steps],
         "duration_seconds": round(result.duration_seconds, 2),
+        "av_analyze_result": _av_analyze_dict(result.av_analyze_result),
     }
 
 
@@ -252,6 +254,8 @@ _HTML_CLASS_LABELS: dict[str, str] = {
     "BASELINE_INVALID": "✗ FAILED — 无效",
     "AV_NOT_BLOCKED": "✗ FAILED — 未拦截",
     "AV_BLOCKED_OR_NO_CHANGE": "✓ SUCCESS — 已拦截",
+    "AV_ANALYZE_BLOCKED": "✓ SUCCESS — AI分析: 已拦截",
+    "AV_ANALYZE_NOT_BLOCKED": "✗ FAILED — AI分析: 未拦截",
 }
 
 _HTML_ROW_CLASS: dict[str, str] = {
@@ -259,6 +263,8 @@ _HTML_ROW_CLASS: dict[str, str] = {
     "BASELINE_INVALID": "row-fail",
     "AV_NOT_BLOCKED": "row-fail",
     "AV_BLOCKED_OR_NO_CHANGE": "row-pass",
+    "AV_ANALYZE_BLOCKED": "row-pass",
+    "AV_ANALYZE_NOT_BLOCKED": "row-fail",
 }
 
 
@@ -271,7 +277,12 @@ def _write_batch_html(result: BatchTestResult, report_dir: Path) -> None:
     overall_label = _html_escape(_html_label(result.classification.value))
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     total_duration = _format_duration(result.duration_seconds)
-    mode_cn = "BASELINE — 验证样本有效性" if result.test_case.mode.value == "baseline" else "AV — 验证杀软拦截"
+    mode_labels: dict[str, str] = {
+        "baseline": "BASELINE — 验证样本有效性",
+        "av": "AV — 验证杀软拦截",
+        "av_analyze": "AV_ANALYZE — AI分析杀软拦截",
+    }
+    mode_cn = mode_labels.get(result.test_case.mode.value, result.test_case.mode.value.upper())
     baseline_str = _html_escape(result.test_case.baseline_result or "")
 
     ring_svg = _build_ring_svg(pass_pct)
@@ -279,7 +290,7 @@ def _write_batch_html(result: BatchTestResult, report_dir: Path) -> None:
     stat_cards = ""
     for key, value in counts.items():
         label = _html_escape(_html_label(key))
-        row_class = "stat-pass" if key in ("BASELINE_VALID", "AV_BLOCKED_OR_NO_CHANGE") else "stat-fail"
+        row_class = "stat-pass" if key in ("BASELINE_VALID", "AV_BLOCKED_OR_NO_CHANGE", "AV_ANALYZE_BLOCKED") else "stat-fail"
         stat_cards += f"""            <div class="stat-item {row_class}">
               <span class="stat-dot"></span>
               <span class="stat-label">{label}</span>
@@ -784,10 +795,10 @@ def _build_ring_svg(pct: int) -> str:
 
 def _classify_pass_fail(counts: dict[str, int]) -> tuple[int, int]:
     pass_count = sum(
-        v for k, v in counts.items() if k in ("BASELINE_VALID", "AV_BLOCKED_OR_NO_CHANGE")
+        v for k, v in counts.items() if k in ("BASELINE_VALID", "AV_BLOCKED_OR_NO_CHANGE", "AV_ANALYZE_BLOCKED")
     )
     fail_count = sum(
-        v for k, v in counts.items() if k in ("BASELINE_INVALID", "AV_NOT_BLOCKED")
+        v for k, v in counts.items() if k in ("BASELINE_INVALID", "AV_NOT_BLOCKED", "AV_ANALYZE_NOT_BLOCKED")
     )
     return pass_count, fail_count
 
@@ -889,6 +900,8 @@ def batch_classification(sample_classifications: tuple[Classification, ...]) -> 
     first = sample_classifications[0]
     if first in {Classification.BASELINE_VALID, Classification.BASELINE_INVALID}:
         return Classification.BASELINE_VALID if all(item == Classification.BASELINE_VALID for item in sample_classifications) else Classification.BASELINE_INVALID
+    if first in {Classification.AV_ANALYZE_BLOCKED, Classification.AV_ANALYZE_NOT_BLOCKED}:
+        return Classification.AV_ANALYZE_NOT_BLOCKED if any(item == Classification.AV_ANALYZE_NOT_BLOCKED for item in sample_classifications) else Classification.AV_ANALYZE_BLOCKED
     return Classification.AV_NOT_BLOCKED if any(item == Classification.AV_NOT_BLOCKED for item in sample_classifications) else Classification.AV_BLOCKED_OR_NO_CHANGE
 
 
@@ -931,3 +944,14 @@ def _log_dicts(logs: tuple[Any, ...]) -> list[dict[str, Any]]:
         }
         for log in logs
     ]
+
+
+def _av_analyze_dict(result: Any) -> dict[str, Any] | None:
+    if result is None:
+        return None
+    return {
+        "log_found": result.log_found,
+        "log_detail": result.log_detail,
+        "screenshot_analysis": result.screenshot_analysis,
+        "classification": result.classification.value,
+    }

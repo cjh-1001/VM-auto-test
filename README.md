@@ -15,9 +15,11 @@
 | YAML 配置 | `init-config` / `config validate` / `run --config` |
 | Baseline 模式 | 干净快照中确认样本效果是否可观测 |
 | AV 模式 | AV 快照中观察效果是否仍发生；baseline 为可选参考 |
+| AV 分析模式 | 不依赖预定义验证命令，通过截图+日志前后对比判定杀软拦截结果 |
 | 报告 | 单样本 JSON/text；批量 JSON+CSV+HTML 交互报告+每样本 artifacts；`report` 从已有 JSON 重新生成 |
 | 截图 | `--capture-screenshot` 或在交互菜单开启；支持样本执行中延迟截图 |
 | AV 检测 | AV 模式下自动检测已知 AV 进程（腾讯电脑管家/360/火绒）+ 可配置日志采集 |
+| AV 日志导出 | 支持 360/火绒/腾讯电脑管家日志数据库自动导出为可读文本 |
 
 ## 安装
 
@@ -138,9 +140,40 @@ vm-auto-test run \
 
 `--baseline-result` 为可选参考，非硬性前置条件。AV 模式会非阻塞检测已知 AV 进程（腾讯电脑管家 `QQPCTray.exe`、360 `360Tray.exe`、火绒 `HipsDaemon.exe`），检测失败不影响测试。
 
+### AV 分析（无需验证命令的截图+日志判定）
+
+适合无法通过命令行输出体现样本效果的场景，通过截图对比和杀软日志变化来判定拦截结果：
+
+```bash
+vm-auto-test run \
+  --vm "E:\VM-MCP\windows11\Windows 11 x64.vmx" \
+  --mode av-analyze --snapshot "av-installed" \
+  --sample-command "C:\Samples\sample.exe" --sample-shell cmd \
+  --reports-dir reports
+```
+
+YAML 配置：
+
+```yaml
+mode: av_analyze
+av_analyze:
+  log_sources:                          # 可选，留空则自动按检测到的杀软配置
+    - guest_path: "C:\\Users\\{username}\\AppData\\Roaming\\360Quarant\\360safe.Summary.dat"
+      description: "360 主数据库"
+  log_collect_command: ""               # 可选，日志收集前置脚本
+```
+
+测试链路：回滚快照 → 启动 VM → 截图(before) → 收集日志(before) → 执行样本 → 延迟截图(after) → 收集日志(after) → 日志对比（导出后归一化比对） → 判定。
+
+当配置了 `api_key_env` 时，还会调用 AI 对截图和日志进行深度分析。
+
+日志源支持 `{username}` 占位符，运行时自动从 Guest 查询真实用户名替换。
+
 ### 截图时机
 
-开启 `--capture-screenshot` 后，框架在样本触发执行后延迟 10 秒自动截图，捕获样本运行中的 Guest 画面。截图与验证后截图互不覆盖。
+开启 `--capture-screenshot` 后：
+- **Baseline/AV 模式**：样本触发执行后延迟 10 秒截图（`screenshot.png`），验证后也有截图。
+- **AV 分析模式**：样本执行前截图（`screenshot_before.png`），执行后延迟 10 秒截图（`screenshot_after.png`），与 AV 模式使用相同的延迟截图逻辑。
 
 ## 批量测试
 
@@ -313,6 +346,8 @@ verification:
 | `BASELINE_INVALID` | FAILED — 无效 | baseline 模式验证输出未改变 |
 | `AV_NOT_BLOCKED` | FAILED — 未拦截 | AV 模式效果仍发生 |
 | `AV_BLOCKED_OR_NO_CHANGE` | SUCCESS — 已拦截 | AV 模式未观察到效果 |
+| `AV_ANALYZE_BLOCKED` | SUCCESS — 已拦截 | AV 分析模式日志有变化，杀软记录新活动 |
+| `AV_ANALYZE_NOT_BLOCKED` | FAILED — 未拦截 | AV 分析模式日志无变化，杀软未检测到威胁 |
 
 ## 报告目录
 
@@ -431,7 +466,7 @@ pytest
 python -m compileall -q src tests
 ```
 
-当前 116 个测试，使用 fake provider，不需真实 VMware 环境。`vm-auto-test-smoke` 仅确认需要时运行。
+当前 125 个测试，使用 fake provider，不需真实 VMware 环境。`vm-auto-test-smoke` 仅确认需要时运行。
 
 Provider 状态：`vmrun` 已实现（默认）；`vsphere`/`powercli`/`mcp` 占位待实现。
 
@@ -446,8 +481,15 @@ src/
     ├── orchestrator.py      # 测试编排（含样本执行中截图）
     ├── evaluator.py         # 输出归一化和比较策略
     ├── reporting.py         # 报告生成（JSON/CSV/HTML）
-    ├── av_detection.py      # AV 进程检测
+    ├── analysis.py          # AI 日志分析和截图分析
+    ├── av_detection.py      # AV 进程检测 + 日志源配置
     ├── av_logs.py           # AV 日志采集
+    ├── av_exporters/        # AV 日志导出（360/火绒/腾讯电脑管家）
+    │   ├── common.py        # 共享工具（SQLite 导出、编码处理）
+    │   ├── presets.py       # 预设调度
+    │   ├── export_360.py    # 360 日志导出
+    │   ├── export_huorong.py # 火绒日志导出
+    │   └── export_tencent.py # 腾讯电脑管家日志导出
     ├── smoke.py             # 真实 VMware smoke test
     └── providers/
         ├── base.py / factory.py / vmrun_provider.py

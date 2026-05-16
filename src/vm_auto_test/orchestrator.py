@@ -10,10 +10,13 @@ from pathlib import Path
 from collections.abc import Sequence
 from typing import TypeVar
 
+from vm_auto_test.analysis import run_analysis
 from vm_auto_test.av_detection import build_detection_command, parse_detection_result
 from vm_auto_test.av_logs import collect_av_logs
 from vm_auto_test.evaluator import classify_result, evaluate_output
 from vm_auto_test.models import (
+    AvAnalyzeResult,
+    AvAnalyzeSpec,
     BatchTestResult,
     Classification,
     CommandResult,
@@ -72,9 +75,23 @@ def _extract_sample_path(command: str) -> str | None:
     return None
 
 
+def _normalize_log_for_comparison(content: str) -> str:
+    """Strip volatile metadata lines so before/after comparison is meaningful."""
+    import re as _re
+
+    return _re.sub(
+        r"^(数据库：.*|生成时间：.*|从 WAL 恢复：.*)\n",
+        "",
+        content,
+        flags=_re.MULTILINE,
+    )
+
+
 def _verdict_text(classification: Classification, mode: TestMode, changed: bool) -> str:
     if mode == TestMode.BASELINE:
         return "✓ SUCCESS — 攻击生效，样本有效" if changed else "✗ FAILED — 攻击未生效，样本无效"
+    if mode == TestMode.AV_ANALYZE:
+        return "✗ FAILED — AI分析: 杀软未拦截" if changed else "✓ SUCCESS — AI分析: 杀软已拦截"
     return "✗ FAILED — 杀软未拦截" if changed else "✓ SUCCESS — 杀软已拦截"
 ProgressCallback = Callable[[StepResult], None]
 T = TypeVar("T")
@@ -92,6 +109,8 @@ class TestOrchestrator:
         self._progress = progress
         self._stage = ""
         self._log_path: Path | None = None
+        self._detected_av_name: str | None = None
+        self._guest_username: str | None = None
 
     async def list_snapshots(self, vm_id: str) -> list[str]:
         return await self._provider.list_snapshots(vm_id)
@@ -175,8 +194,15 @@ class TestOrchestrator:
             self._log_path.open("a", encoding="utf-8").write(
                 f"{timestamp}  {stage_part}⊘ {name}  {detail}\n"
             )
+        elif status == "info":
+            self._log_path.open("a", encoding="utf-8").write(
+                f"{timestamp}  {stage_part}ℹ {name}  {detail}\n"
+            )
 
     async def run(self, test_case: TestCase) -> TestResult:
+        if test_case.mode == TestMode.AV_ANALYZE:
+            return await self.run_av_analyze(test_case)
+
         self._validate_test_case(test_case)
         steps: list[StepResult] = []
 
@@ -406,6 +432,11 @@ class TestOrchestrator:
         *,
         run_av_detect: bool = True,
     ) -> SampleTestResult:
+        if test_case.mode == TestMode.AV_ANALYZE:
+            return await self._run_single_sample_av_analyze(
+                test_case, sample, report_dir, run_av_detect=run_av_detect,
+            )
+
         t0 = time.monotonic()
         steps: list[StepResult] = []
 
@@ -549,7 +580,7 @@ class TestOrchestrator:
         steps.append(StepResult("wait_guest_ready", "passed", "guest tools", self._stage))
 
     async def _detect_av_step(self, test_case: TestCase, steps: list[StepResult]) -> None:
-        if test_case.mode != TestMode.AV:
+        if test_case.mode not in (TestMode.AV, TestMode.AV_ANALYZE):
             return
         self._stage = "验证环境"
         try:
@@ -559,6 +590,7 @@ class TestOrchestrator:
                 lambda: self._detect_av(test_case),
                 lambda result: f"检测到: {result}" if result else "未检测到已知杀软",
             )
+            self._detected_av_name = detected
             steps.append(StepResult("detect_av", "passed", detected or "未识别", self._stage))
         except Exception:
             pass
@@ -582,6 +614,27 @@ class TestOrchestrator:
             test_case.command_timeout_seconds,
             progress=self._emit_step,
         )
+
+    async def _get_guest_username(self, test_case: TestCase) -> str:
+        """Query the guest for the real %%USERNAME%% via cmd (most reliable over vmrun)."""
+        if self._guest_username is not None:
+            return self._guest_username
+        try:
+            result = await self._provider.run_guest_command(
+                test_case.vm_id,
+                "cmd /c echo %USERNAME%",
+                Shell.CMD,
+                test_case.credentials,
+                test_case.command_timeout_seconds,
+            )
+            value = result.stdout.strip().splitlines()[-1].strip()
+            if value:
+                self._guest_username = value
+                return value
+        except Exception:
+            pass
+        self._guest_username = test_case.credentials.user
+        return self._guest_username
 
     async def _detect_av(self, test_case: TestCase) -> str | None:
         command = build_detection_command()
@@ -643,21 +696,25 @@ class TestOrchestrator:
         test_case: TestCase,
         report_dir: Path,
         sample_started: asyncio.Event,
+        filename: str = "screenshot.png",
     ) -> asyncio.Task[StepResult] | None:
         if not test_case.capture_screenshot:
             return None
-        return asyncio.create_task(self._capture_sample_screenshot(test_case, report_dir, sample_started))
+        return asyncio.create_task(self._capture_sample_screenshot(
+            test_case, report_dir, sample_started, filename,
+        ))
 
     async def _capture_sample_screenshot(
         self,
         test_case: TestCase,
         report_dir: Path,
         sample_started: asyncio.Event,
+        filename: str = "screenshot.png",
     ) -> StepResult:
         await sample_started.wait()
         await asyncio.sleep(_SAMPLE_SCREENSHOT_DELAY_SECONDS)
         report_dir.mkdir(parents=True, exist_ok=True)
-        screenshot_path = str(report_dir / "screenshot.png")
+        screenshot_path = str(report_dir / filename)
         try:
             await self._run_progress_step(
                 "capture_screenshot",
@@ -684,6 +741,374 @@ class TestOrchestrator:
                 sample_path, type(exc).__name__,
             )
             return True
+
+    async def run_av_analyze(self, test_case: TestCase) -> TestResult:
+        if test_case.av_analyze is None:
+            raise ValueError("AV_ANALYZE mode requires av_analyze config")
+        steps: list[StepResult] = []
+
+        self._stage = "结果"
+        report_dir = self._run_sync_progress_step(
+            "create_report_dir",
+            "sample",
+            lambda: create_report_dir(self._report_base_dir, Path(test_case.sample_command).stem or "sample"),
+            lambda result: str(result),
+        )
+        self._log_path = report_dir / "test.log"
+
+        await self._prepare_vm(test_case, steps)
+        await self._detect_av_step(test_case, steps)
+
+        # Before: screenshot + collect logs
+        self._stage = "截图(before)"
+        report_dir.mkdir(parents=True, exist_ok=True)
+        before_screenshot_path = str(report_dir / "screenshot_before.png")
+        if test_case.capture_screenshot:
+            await self._run_progress_step(
+                "capture_screenshot_before",
+                "screenshot before sample",
+                lambda: self._provider.capture_screen(
+                    test_case.vm_id,
+                    before_screenshot_path,
+                    test_case.credentials,
+                ),
+                before_screenshot_path,
+            )
+            steps.append(StepResult("capture_screenshot_before", "passed", before_screenshot_path, self._stage))
+
+        self._stage = "收集日志(before)"
+        before_log_content = await self._collect_analyze_logs(test_case, report_dir, steps, suffix="before")
+
+        # Run sample
+        self._stage = "运行恶意脚本"
+        sample_path = _extract_sample_path(test_case.sample_command)
+        if sample_path is not None and not await self._verify_sample_on_guest(test_case, sample_path):
+            skip_detail = f"跳过: 样本文件不存在 ({sample_path})"
+            self._emit("run_sample", "skipped", skip_detail)
+            steps.append(StepResult("run_sample", "skipped", skip_detail, self._stage))
+            sample = CommandResult(
+                command=test_case.sample_command,
+                capture_method="skipped_file_not_found",
+            )
+        else:
+            sample_started = asyncio.Event()
+            screenshot_task = self._create_sample_screenshot_task(
+                test_case, report_dir, sample_started, filename="screenshot_after.png",
+            )
+            sample = await self._run_sample_safe(
+                test_case,
+                test_case.sample_command,
+                test_case.sample_shell,
+                progress=self._sample_launch_progress(sample_started),
+            )
+            if not sample_started.is_set():
+                sample_started.set()
+            screenshot_step = await screenshot_task if screenshot_task else None
+            steps.append(StepResult("run_sample", sample.exit_code == 0 and "passed" or "failed", sample.capture_method, self._stage))
+            if screenshot_step:
+                steps.append(screenshot_step)
+
+        after_screenshot_path = str(report_dir / "screenshot_after.png")
+
+        self._stage = "收集日志(after)"
+        after_log_content = await self._collect_analyze_logs(test_case, report_dir, steps, suffix="after")
+
+        # Compare before vs after logs (follow AV mode pattern)
+        self._stage = "日志分析"
+        logs_changed = _normalize_log_for_comparison(after_log_content) != _normalize_log_for_comparison(before_log_content)
+        if test_case.av_analyze.api_key_env or test_case.av_analyze.analyzer_command:
+            av_analyze_result = await self._run_ai_analysis(
+                test_case.av_analyze, after_log_content,
+                Path(before_screenshot_path), Path(after_screenshot_path),
+            )
+        elif logs_changed:
+            av_analyze_result = AvAnalyzeResult(
+                log_found=True,
+                log_detail="日志有变化（与样本执行前对比），杀软记录了新活动",
+                classification=Classification.AV_ANALYZE_BLOCKED,
+            )
+        else:
+            av_analyze_result = AvAnalyzeResult(
+                log_found=False,
+                log_detail="日志无变化，杀软未检测到威胁",
+                classification=Classification.AV_ANALYZE_NOT_BLOCKED,
+            )
+        steps.append(StepResult("log_analysis", "passed", av_analyze_result.classification.value, self._stage))
+
+        self._stage = "验证攻击效果"
+        if av_analyze_result.classification == Classification.AV_ANALYZE_BLOCKED:
+            self._emit("evaluate", "passed", "✓ SUCCESS — 杀软已拦截")
+        else:
+            self._emit("evaluate", "passed", "✗ FAILED — 杀软未拦截")
+
+        result = TestResult(
+            test_case=test_case,
+            report_dir=str(report_dir),
+            before=CommandResult(command="screenshot"),
+            sample=sample,
+            after=CommandResult(command="screenshot"),
+            changed=av_analyze_result.classification == Classification.AV_ANALYZE_NOT_BLOCKED,
+            classification=av_analyze_result.classification,
+            steps=tuple(steps),
+            evaluation=None,
+            logs=(),
+            av_analyze_result=av_analyze_result,
+        )
+
+        self._stage = "结果"
+        self._run_sync_progress_step(
+            "write_report",
+            "result.json",
+            lambda: write_report(result),
+            str(report_dir),
+        )
+        return result
+
+    async def _run_single_sample_av_analyze(
+        self,
+        test_case: TestCase,
+        sample: SampleSpec,
+        report_dir: Path,
+        *,
+        run_av_detect: bool = True,
+    ) -> SampleTestResult:
+        if test_case.av_analyze is None:
+            raise ValueError("AV_ANALYZE mode requires av_analyze config")
+        t0 = time.monotonic()
+        steps: list[StepResult] = []
+
+        await self._prepare_vm(test_case, steps)
+        if run_av_detect:
+            await self._detect_av_step(test_case, steps)
+
+        # Before: screenshot + collect logs
+        self._stage = "截图(before)"
+        report_dir.mkdir(parents=True, exist_ok=True)
+        before_screenshot_path = str(report_dir / "screenshot_before.png")
+        if test_case.capture_screenshot:
+            await self._run_progress_step(
+                "capture_screenshot_before",
+                "screenshot before sample",
+                lambda: self._provider.capture_screen(
+                    test_case.vm_id,
+                    before_screenshot_path,
+                    test_case.credentials,
+                ),
+                before_screenshot_path,
+            )
+            steps.append(StepResult("capture_screenshot_before", "passed", before_screenshot_path, self._stage))
+
+        self._stage = "收集日志(before)"
+        before_log_content = await self._collect_analyze_logs(test_case, report_dir, steps, suffix="before")
+
+        # Run sample
+        self._stage = "运行恶意脚本"
+        sample_path = _extract_sample_path(sample.command)
+        if sample_path is not None and not await self._verify_sample_on_guest(test_case, sample_path):
+            skip_detail = f"跳过: 样本文件不存在 ({sample_path})"
+            self._emit("run_sample", "skipped", skip_detail)
+            steps.append(StepResult("run_sample", "skipped", skip_detail, self._stage))
+            sample_result = CommandResult(
+                command=sample.command,
+                capture_method="skipped_file_not_found",
+            )
+        else:
+            sample_started = asyncio.Event()
+            screenshot_task = self._create_sample_screenshot_task(
+                test_case, report_dir, sample_started, filename="screenshot_after.png",
+            )
+            sample_result = await self._run_sample_safe(
+                test_case,
+                sample.command,
+                sample.shell,
+                progress=self._sample_launch_progress(sample_started),
+            )
+            if not sample_started.is_set():
+                sample_started.set()
+            screenshot_step = await screenshot_task if screenshot_task else None
+            steps.append(StepResult("run_sample", sample_result.exit_code == 0 and "passed" or "failed", sample_result.capture_method, self._stage))
+            if screenshot_step:
+                steps.append(screenshot_step)
+
+        after_screenshot_path = str(report_dir / "screenshot_after.png")
+
+        self._stage = "收集日志(after)"
+        after_log_content = await self._collect_analyze_logs(test_case, report_dir, steps, suffix="after")
+
+        # Compare before vs after logs (follow AV mode pattern)
+        self._stage = "日志分析"
+        logs_changed = _normalize_log_for_comparison(after_log_content) != _normalize_log_for_comparison(before_log_content)
+        if test_case.av_analyze.api_key_env or test_case.av_analyze.analyzer_command:
+            av_analyze_result = await self._run_ai_analysis(
+                test_case.av_analyze, after_log_content,
+                Path(before_screenshot_path), Path(after_screenshot_path),
+            )
+        elif logs_changed:
+            av_analyze_result = AvAnalyzeResult(
+                log_found=True,
+                log_detail="日志有变化（与样本执行前对比），杀软记录了新活动",
+                classification=Classification.AV_ANALYZE_BLOCKED,
+            )
+        else:
+            av_analyze_result = AvAnalyzeResult(
+                log_found=False,
+                log_detail="日志无变化，杀软未检测到威胁",
+                classification=Classification.AV_ANALYZE_NOT_BLOCKED,
+            )
+        steps.append(StepResult("log_analysis", "passed", av_analyze_result.classification.value, self._stage))
+
+        self._stage = "验证攻击效果"
+        if av_analyze_result.classification == Classification.AV_ANALYZE_BLOCKED:
+            self._emit("evaluate", "passed", "✓ SUCCESS — 杀软已拦截")
+        else:
+            self._emit("evaluate", "passed", "✗ FAILED — 杀软未拦截")
+
+        logs_changed = av_analyze_result.classification == Classification.AV_ANALYZE_BLOCKED
+        return SampleTestResult(
+            test_case=test_case,
+            sample_spec=sample,
+            report_dir=str(report_dir),
+            before=CommandResult(command="screenshot"),
+            sample=sample_result,
+            after=CommandResult(command="screenshot"),
+            evaluation=EvaluationResult(
+                changed=logs_changed,
+                effect_observed=logs_changed,
+            ),
+            classification=av_analyze_result.classification,
+            steps=tuple(steps),
+            logs=(),
+            duration_seconds=time.monotonic() - t0,
+            av_analyze_result=av_analyze_result,
+        )
+
+    async def _collect_analyze_logs(
+        self,
+        test_case: TestCase,
+        report_dir: Path,
+        steps: list[StepResult],
+        suffix: str = "",
+    ) -> str:
+        config = test_case.av_analyze
+        if config is None:
+            return ""
+
+        log_dir = report_dir / "av_logs"
+        if suffix:
+            log_dir = log_dir / suffix
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_parts: list[str] = []
+
+        if config.log_collect_command:
+            try:
+                log_result = await self._provider.run_guest_command(
+                    test_case.vm_id,
+                    config.log_collect_command,
+                    config.log_collect_shell,
+                    test_case.credentials,
+                    test_case.command_timeout_seconds,
+                    progress=self._emit_step,
+                )
+                if log_result.stdout:
+                    log_parts.append(log_result.stdout)
+                if log_result.stderr:
+                    log_parts.append(log_result.stderr)
+                (log_dir / "collect_stdout.txt").write_text(
+                    log_result.stdout, encoding="utf-8",
+                )
+                steps.append(StepResult("collect_logs", "passed", "log collection script", self._stage))
+            except Exception as exc:
+                self._emit("collect_logs", "failed", str(exc))
+                steps.append(StepResult("collect_logs", "failed", str(exc), self._stage))
+
+        # Resolve effective log_sources and export_preset (auto-detect if not configured)
+        effective_sources = list(config.log_sources)
+        effective_preset = config.log_export_preset
+
+        if not effective_sources and not effective_preset and self._detected_av_name:
+            from vm_auto_test.av_detection import get_log_profile
+            from vm_auto_test.models import AvLogSource as Als
+
+            profile = get_log_profile(self._detected_av_name)
+            if profile:
+                effective_sources = [
+                    Als(guest_path=path, description=desc)
+                    for path, desc in profile.log_sources
+                ]
+                effective_preset = profile.export_preset
+                self._emit("collect_logs", "info", f"自动配置 {len(effective_sources)} 个日志源, 导出预设: {effective_preset}")
+                steps.append(StepResult("collect_logs", "passed", f"auto-detected {self._detected_av_name}", self._stage))
+
+        raw_files: list[Path] = []
+        for log_source in effective_sources:
+            try:
+                resolved_guest_path = log_source.guest_path.replace(
+                    "{username}", await self._get_guest_username(test_case)
+                )
+                local_filename = Path(resolved_guest_path).name or "log.txt"
+                local_path = log_dir / local_filename
+                await self._provider.copy_file_from_guest(
+                    test_case.vm_id,
+                    resolved_guest_path,
+                    str(local_path),
+                    test_case.credentials,
+                )
+                raw_files.append(local_path)
+                self._emit("collect_logs", "info", f"copied: {resolved_guest_path}")
+                steps.append(StepResult("collect_logs", "passed", resolved_guest_path, self._stage))
+            except Exception as exc:
+                self._emit("collect_logs", "failed", f"{resolved_guest_path}: {exc}")
+                steps.append(StepResult("collect_logs", "failed", str(exc), self._stage))
+
+        if effective_preset and raw_files:
+            try:
+                from vm_auto_test.av_exporters.presets import run_log_export
+
+                project_root = Path(__file__).resolve().parent.parent.parent
+                export_output = run_log_export(
+                    effective_preset,
+                    tuple(raw_files),
+                    log_dir,
+                    project_root,
+                )
+                exported_text = Path(export_output).read_text(encoding="utf-8", errors="replace")
+                log_parts.append(exported_text)
+                self._emit("export_logs", "passed", f"preset={effective_preset}, {len(exported_text)} chars")
+                steps.append(StepResult("export_logs", "passed", effective_preset, self._stage))
+            except Exception as exc:
+                self._emit("export_logs", "failed", str(exc))
+                steps.append(StepResult("export_logs", "failed", str(exc), self._stage))
+        else:
+            for local_path in raw_files:
+                try:
+                    content = local_path.read_text(encoding="utf-8", errors="replace")
+                    log_parts.append(f"=== {local_path.name} ===\n{content}")
+                except Exception:
+                    pass
+
+        combined = "\n\n".join(log_parts)
+        (log_dir / "collected_logs.txt").write_text(combined, encoding="utf-8")
+        return combined
+
+    async def _run_ai_analysis(
+        self,
+        config: AvAnalyzeSpec,
+        log_content: str,
+        before_screenshot: Path,
+        after_screenshot: Path,
+    ) -> AvAnalyzeResult:
+        # The caller ensures report_dir parent exists; derive paths
+        report_dir = before_screenshot.parent
+        log_file = report_dir / "av_logs" / "after" / "collected_logs.txt"
+
+        return await run_analysis(
+            config,
+            log_content,
+            log_file,
+            before_screenshot,
+            after_screenshot,
+            report_dir,
+        )
 
     def _validate_test_case(self, test_case: TestCase) -> None:
         pass

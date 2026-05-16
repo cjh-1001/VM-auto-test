@@ -53,6 +53,8 @@ def classify_cn(classification: Classification | str, short: bool = False) -> st
         "BASELINE_INVALID": "✗ FAILED — 无效" if short else "样本无效（前后输出无变化）",
         "AV_NOT_BLOCKED": "✗ FAILED — 未拦截" if short else "杀软未拦截（攻击效果发生）",
         "AV_BLOCKED_OR_NO_CHANGE": "✓ SUCCESS — 已拦截" if short else "杀软已拦截或未生效",
+        "AV_ANALYZE_BLOCKED": "✓ SUCCESS — AI分析: 已拦截",
+        "AV_ANALYZE_NOT_BLOCKED": "✗ FAILED — AI分析: 未拦截",
     }
     value = classification.value if hasattr(classification, "value") else str(classification)
     return mapping.get(value, value)

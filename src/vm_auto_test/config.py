@@ -12,7 +12,9 @@ _LOGGER = logging.getLogger(__name__)
 _PACKAGE_DIR = Path(__file__).resolve().parent
 
 from vm_auto_test.models import (
+    AvAnalyzeSpec,
     AvLogCollectorSpec,
+    AvLogSource,
     ComparisonKind,
     ComparisonSpec,
     GuestCredentials,
@@ -76,6 +78,24 @@ class AvLogCollectorConfig:
 
 
 @dataclass(frozen=True)
+class AvLogSourceConfig:
+    guest_path: str
+    description: str = ""
+
+
+@dataclass(frozen=True)
+class AvAnalyzeConfig:
+    log_sources: tuple[AvLogSourceConfig, ...] = field(default_factory=tuple)
+    log_collect_command: str | None = None
+    log_collect_shell: Shell = Shell.POWERSHELL
+    log_export_preset: str = ""
+    log_analysis_prompt: str = ""
+    screenshot_analysis_prompt: str = ""
+    api_key_env: str = ""
+    analyzer_command: str = ""
+
+
+@dataclass(frozen=True)
 class ProviderConfig:
     type: str = "vmrun"
 
@@ -108,6 +128,7 @@ class TestConfig:
     normalize: NormalizeConfig = field(default_factory=NormalizeConfig)
     samples: tuple[SampleConfig, ...] = field(default_factory=tuple)
     av_log_collectors: tuple[AvLogCollectorConfig, ...] = field(default_factory=tuple)
+    av_analyze: AvAnalyzeConfig | None = None
     provider: ProviderConfig = field(default_factory=ProviderConfig)
 
 
@@ -170,6 +191,7 @@ def parse_config(data: dict[str, Any]) -> TestConfig:
         ),
         normalize=NormalizeConfig(**_normalize_kwargs),
         av_log_collectors=_parse_av_log_collectors(data.get("av_logs") or {}),
+        av_analyze=_parse_av_analyze(data.get("av_analyze")),
         provider=ProviderConfig(type=str(provider_data.get("type") or "vmrun")),
     )
 
@@ -198,6 +220,7 @@ def to_test_case(config: TestConfig, password: str | None = None) -> TestCase:
         samples=tuple(_to_sample_spec(sample_config) for sample_config in config.samples),
         verification=_to_verification_spec(config.verification),
         av_log_collectors=tuple(_to_av_log_spec(collector) for collector in config.av_log_collectors),
+        av_analyze=_to_av_analyze_spec(config.av_analyze),
     )
 
 
@@ -256,6 +279,8 @@ def to_yaml_dict(config: TestConfig) -> dict[str, Any]:
         data["guest"]["password"] = config.guest.password
     if config.baseline_result:
         data["baseline_result"] = config.baseline_result
+    if config.av_analyze:
+        data["av_analyze"] = _av_analyze_to_yaml(config.av_analyze)
     return data
 
 
@@ -366,6 +391,49 @@ def _to_verification_spec(verification: VerificationConfig) -> VerificationSpec:
     )
 
 
+def _parse_av_analyze(value: Any) -> AvAnalyzeConfig | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("Config field 'av_analyze' must be a mapping")
+    log_sources_data = value.get("log_sources") or []
+    log_sources = tuple(
+        AvLogSourceConfig(
+            guest_path=_required_string(item, "guest_path"),
+            description=_optional_string(item, "description") or "",
+        )
+        for item in log_sources_data
+    )
+    return AvAnalyzeConfig(
+        log_sources=log_sources,
+        log_collect_command=_optional_string(value, "log_collect_command"),
+        log_collect_shell=Shell(_optional_string(value, "log_collect_shell") or "powershell"),
+        log_export_preset=_optional_string(value, "log_export_preset") or "",
+        log_analysis_prompt=_optional_string(value, "log_analysis_prompt") or "",
+        screenshot_analysis_prompt=_optional_string(value, "screenshot_analysis_prompt") or "",
+        api_key_env=_optional_string(value, "api_key_env") or "",
+        analyzer_command=_optional_string(value, "analyzer_command") or "",
+    )
+
+
+def _to_av_analyze_spec(config: AvAnalyzeConfig | None) -> AvAnalyzeSpec | None:
+    if config is None:
+        return None
+    return AvAnalyzeSpec(
+        log_sources=tuple(
+            AvLogSource(guest_path=s.guest_path, description=s.description)
+            for s in config.log_sources
+        ),
+        log_collect_command=config.log_collect_command,
+        log_collect_shell=config.log_collect_shell,
+        log_export_preset=config.log_export_preset,
+        log_analysis_prompt=config.log_analysis_prompt,
+        screenshot_analysis_prompt=config.screenshot_analysis_prompt,
+        api_key_env=config.api_key_env,
+        analyzer_command=config.analyzer_command,
+    )
+
+
 def _to_av_log_spec(collector: AvLogCollectorConfig) -> AvLogCollectorSpec:
     return AvLogCollectorSpec(
         id=collector.id,
@@ -407,6 +475,29 @@ def _sample_to_yaml(sample: SampleConfig) -> dict[str, Any]:
     }
     if sample.verification:
         data["verification"] = _verification_to_yaml(sample.verification)
+    return data
+
+
+def _av_analyze_to_yaml(config: AvAnalyzeConfig) -> dict[str, Any]:
+    data: dict[str, Any] = {}
+    if config.log_sources:
+        data["log_sources"] = [
+            {"guest_path": s.guest_path, "description": s.description}
+            for s in config.log_sources
+        ]
+    if config.log_collect_command:
+        data["log_collect_command"] = config.log_collect_command
+        data["log_collect_shell"] = config.log_collect_shell.value
+    if config.log_export_preset:
+        data["log_export_preset"] = config.log_export_preset
+    if config.log_analysis_prompt:
+        data["log_analysis_prompt"] = config.log_analysis_prompt
+    if config.screenshot_analysis_prompt:
+        data["screenshot_analysis_prompt"] = config.screenshot_analysis_prompt
+    if config.api_key_env:
+        data["api_key_env"] = config.api_key_env
+    if config.analyzer_command:
+        data["analyzer_command"] = config.analyzer_command
     return data
 
 
@@ -591,10 +682,10 @@ def parse_csv_samples(
 
         if not sample_file:
             raise ValueError(f"Row {row_index}: sample_file is empty")
-        if not verify_command:
-            raise ValueError(f"Row {row_index}: verify_command is empty")
-        if verify_shell_str not in {"cmd", "powershell"}:
+        if verify_shell_str not in {"cmd", "powershell", ""}:
             raise ValueError(f"Row {row_index}: verify_shell must be 'cmd' or 'powershell', got '{verify_shell_str}'")
+        if not verify_command and verify_shell_str:
+            raise ValueError(f"Row {row_index}: verify_command is empty")
 
         sample_path = Path(sample_file)
         if sample_path.is_absolute():

@@ -66,3 +66,11 @@ class VmwareProvider(ABC):
     @abstractmethod
     async def capture_screen(self, vm_id: str, output_path: str, credentials: GuestCredentials) -> str:
         raise NotImplementedError
+
+    @abstractmethod
+    async def copy_file_from_guest(self, vm_id: str, guest_path: str, host_path: str, credentials: GuestCredentials) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def list_guest_directory(self, vm_id: str, guest_path: str, credentials: GuestCredentials) -> str:
+        raise NotImplementedError

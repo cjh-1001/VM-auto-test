@@ -8,6 +8,7 @@ from typing import Any, Literal
 class TestMode(str, Enum):
     BASELINE = "baseline"
     AV = "av"
+    AV_ANALYZE = "av_analyze"
 
 
 class Classification(str, Enum):
@@ -15,6 +16,8 @@ class Classification(str, Enum):
     BASELINE_INVALID = "BASELINE_INVALID"
     AV_NOT_BLOCKED = "AV_NOT_BLOCKED"
     AV_BLOCKED_OR_NO_CHANGE = "AV_BLOCKED_OR_NO_CHANGE"
+    AV_ANALYZE_BLOCKED = "AV_ANALYZE_BLOCKED"
+    AV_ANALYZE_NOT_BLOCKED = "AV_ANALYZE_NOT_BLOCKED"
 
 
 class Shell(str, Enum):
@@ -118,6 +121,32 @@ class CollectedLog:
 
 
 @dataclass(frozen=True)
+class AvLogSource:
+    guest_path: str
+    description: str = ""
+
+
+@dataclass(frozen=True)
+class AvAnalyzeSpec:
+    log_sources: tuple[AvLogSource, ...] = field(default_factory=tuple)
+    log_collect_command: str | None = None
+    log_collect_shell: Shell = Shell.POWERSHELL
+    log_export_preset: str = ""
+    log_analysis_prompt: str = ""
+    screenshot_analysis_prompt: str = ""
+    api_key_env: str = ""
+    analyzer_command: str = ""
+
+
+@dataclass(frozen=True)
+class AvAnalyzeResult:
+    log_found: bool
+    log_detail: str = ""
+    screenshot_analysis: str | None = None
+    classification: Classification = Classification.AV_ANALYZE_NOT_BLOCKED
+
+
+@dataclass(frozen=True)
 class TestCase:
     vm_id: str
     snapshot: str | None
@@ -137,6 +166,7 @@ class TestCase:
     verification: VerificationSpec | None = None
     av_log_collectors: tuple[AvLogCollectorSpec, ...] = field(default_factory=tuple)
     capture_screenshot: bool = False
+    av_analyze: AvAnalyzeSpec | None = None
 
     def effective_samples(self) -> tuple[SampleSpec, ...]:
         if self.samples:
@@ -175,6 +205,7 @@ class TestResult:
     steps: tuple[StepResult, ...] = field(default_factory=tuple)
     evaluation: EvaluationResult | None = None
     logs: tuple[CollectedLog, ...] = field(default_factory=tuple)
+    av_analyze_result: AvAnalyzeResult | None = None
 
 
 @dataclass(frozen=True)
@@ -190,6 +221,7 @@ class SampleTestResult:
     steps: tuple[StepResult, ...] = field(default_factory=tuple)
     logs: tuple[CollectedLog, ...] = field(default_factory=tuple)
     duration_seconds: float = 0.0
+    av_analyze_result: AvAnalyzeResult | None = None
 
     @property
     def changed(self) -> bool:

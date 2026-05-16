@@ -38,6 +38,7 @@ from vm_auto_test.env import (
     upsert_vm_credentials,
 )
 from vm_auto_test.models import (
+    AvAnalyzeSpec,
     BatchTestResult,
     ComparisonSpec,
     GuestCredentials,
@@ -87,7 +88,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     run_parser = subparsers.add_parser("run", help="Run baseline or AV validation")
     run_parser.add_argument("--vm", help="VM ID or .vmx path")
-    run_parser.add_argument("--mode", choices=[mode.value for mode in TestMode])
+    run_parser.add_argument("--mode", choices=[m.value for m in TestMode])
     run_parser.add_argument("--snapshot", help="Snapshot name. If omitted, choose interactively.")
     run_parser.add_argument("--sample-command", help="Guest command that runs the sample")
     run_parser.add_argument("--sample-shell", choices=[shell.value for shell in Shell], default=Shell.CMD.value)
@@ -106,16 +107,16 @@ def build_parser() -> argparse.ArgumentParser:
     init_parser = subparsers.add_parser("init-config", help="Create a test config interactively")
     init_parser.add_argument("--output", default="configs/sample.yaml", help="Config file to write")
     init_parser.add_argument("--vm", help="VM ID or .vmx path")
-    init_parser.add_argument("--mode", choices=[mode.value for mode in TestMode])
+    init_parser.add_argument("--mode", choices=[m.value for m in TestMode])
     init_parser.add_argument("--samples-dir", help="Directory of sample files to auto-generate samples list")
 
     run_dir_parser = subparsers.add_parser("run-dir", help="Run all samples from a directory")
     run_dir_parser.add_argument("--vm", required=True, help="VM ID or .vmx path")
-    run_dir_parser.add_argument("--mode", choices=[mode.value for mode in TestMode], required=True)
+    run_dir_parser.add_argument("--mode", choices=[m.value for m in TestMode], required=True)
     run_dir_parser.add_argument("--snapshot", help="Snapshot name. If omitted, choose interactively.")
     run_dir_parser.add_argument("--dir", required=True, help="Directory containing sample files")
     run_dir_parser.add_argument("--pattern", help="File glob pattern (e.g. *.exe)")
-    run_dir_parser.add_argument("--verify-command", required=True, help="Guest command that verifies effect")
+    run_dir_parser.add_argument("--verify-command", help="Guest command that verifies effect")
     run_dir_parser.add_argument("--verify-shell", choices=[shell.value for shell in Shell], default=Shell.POWERSHELL.value)
     run_dir_parser.add_argument("--guest-user")
     run_dir_parser.add_argument("--guest-password")
@@ -125,7 +126,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     run_csv_parser = subparsers.add_parser("run-csv", help="Run all samples from a CSV table")
     run_csv_parser.add_argument("--vm", required=True, help="VM ID or .vmx path")
-    run_csv_parser.add_argument("--mode", choices=[mode.value for mode in TestMode], required=True)
+    run_csv_parser.add_argument("--mode", choices=[m.value for m in TestMode], required=True)
     run_csv_parser.add_argument("--snapshot", help="Snapshot name. If omitted, choose interactively.")
     run_csv_parser.add_argument("--csv", required=True, help="Path to CSV file (UTF-8 BOM, columns: sample_file,verify_command,verify_shell)")
     run_csv_parser.add_argument("--samples-base-dir", help="Base directory on VM for relative sample paths")
@@ -236,8 +237,8 @@ async def main_async(argv: Sequence[str] | None = None) -> int:
             SampleSpec(id=cfg.id, command=cfg.command, shell=cfg.shell)
             for cfg in sample_configs
         )
-        verify_shell = Shell(args.verify_shell)
-        verify_command = clean_cli_value(args.verify_command)
+        verify_shell = Shell(args.verify_shell) if args.verify_shell else Shell.POWERSHELL
+        verify_command = clean_cli_value(args.verify_command) if args.verify_command else ""
         test_case = TestCase(
             vm_id=vm_id,
             snapshot=snapshot,
@@ -375,7 +376,7 @@ async def main_async(argv: Sequence[str] | None = None) -> int:
         mode=TestMode(args.mode),
         sample_command=args.sample_command,
         sample_shell=Shell(args.sample_shell),
-        verify_command=args.verify_command,
+        verify_command=args.verify_command or "",
         verify_shell=Shell(args.verify_shell),
         credentials=GuestCredentials(guest_user, guest_password),
         baseline_result=args.baseline_result,
@@ -508,16 +509,14 @@ def _validate_run_config_args(parser: argparse.ArgumentParser, args: argparse.Na
 
 
 def _validate_run_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
-    missing = [
-        option
-        for option, value in (
-            ("--vm", args.vm),
-            ("--mode", args.mode),
-            ("--sample-command", args.sample_command),
-            ("--verify-command", args.verify_command),
-        )
-        if value is None
+    required = [
+        ("--vm", args.vm),
+        ("--mode", args.mode),
+        ("--sample-command", args.sample_command),
     ]
+    if args.mode != "av_analyze":
+        required.append(("--verify-command", args.verify_command))
+    missing = [option for option, value in required if value is None]
     if missing:
         parser.error("run requires --config or " + ", ".join(missing))
 
@@ -531,14 +530,15 @@ async def _interactive_menu(provider: VmwareProvider, env_file: Path) -> None:
         print("  [3] 列出 VM")
         print("  [4] 列出快照")
         print("  [5] 计划任务")
-        print("  [6] 重新配置环境")
+        print("  [6] AV分析测试 (AI+截图)")
+        print("  [7] 重新配置环境")
         choice = input("\n  > ").strip()
 
         if choice == "0":
             print("  已退出")
             return
 
-        if choice == "6":
+        if choice == "7":
             await _interactive_setup(env_file)
             continue
 
@@ -570,6 +570,8 @@ async def _interactive_menu(provider: VmwareProvider, env_file: Path) -> None:
             await _interactive_single(provider)
         elif choice == "2":
             await _interactive_csv(provider)
+        elif choice == "6":
+            await _interactive_av_analyze(provider)
         else:
             print("  无效选项")
 
@@ -722,6 +724,127 @@ async def _interactive_single(provider: VmwareProvider) -> None:
         return
 
 
+async def _interactive_av_analyze(provider: VmwareProvider) -> None:
+    test_case = await _build_interactive_av_analyze_test_case(provider, confirm_action="执行")
+    if test_case is None:
+        return
+    orch = TestOrchestrator(provider, Path("reports"), progress=print_progress)
+    try:
+        reset_progress()
+        await orch.run(test_case)
+    except VmToolsNotReadyError:
+        return
+
+
+async def _build_interactive_av_analyze_test_case(
+    provider: VmwareProvider,
+    *,
+    confirm_action: str,
+) -> TestCase | None:
+    vm_id: str | None = None
+    snapshot: str | None = None
+    sample_command: str | None = None
+    guest_user: str | None = None
+    guest_password: str | None = None
+
+    step = 0
+    while True:
+        if step == 0:
+            running = await provider.list_running_vms()
+            if running:
+                print("\n  —— 选择 VM ——")
+                result = choose_from_list(running, "选择 VM")
+                if result is None or result is _BACK:
+                    return None
+                vm_id = result
+            else:
+                print("\n  —— 输入 VM 路径 ——")
+                result = _prompt_back("VM 路径")
+                if result is None:
+                    return None
+                vm_id = clean_cli_value(result)
+            step = 1
+            continue
+
+        if step == 1:
+            print("  正在查询快照 ...", flush=True)
+            orchestrator = TestOrchestrator(provider, Path("reports"))
+            try:
+                snapshots = await orchestrator.list_snapshots(vm_id)
+            except RuntimeError as exc:
+                print(f"  {exc}")
+                step = 0
+                continue
+            if not snapshots:
+                print("  没有找到快照，请先在 VMware Workstation 中为该 VM 创建快照")
+                step = 0
+                continue
+            print("\n  —— 选择快照（应已安装杀软）——")
+            result = choose_from_list(snapshots, "选择快照")
+            if result is None:
+                return None
+            if result is _BACK:
+                step = 0
+                continue
+            snapshot = result
+            step = 2
+            continue
+
+        if step == 2:
+            print("\n  —— 样本路径 ——")
+            result = _prompt_back("样本路径 (例如 C:\\Samples\\malware.exe)")
+            if result is None:
+                step = 1
+                continue
+            sample_command = result
+            step = 3
+            continue
+
+        if step == 3:
+            print("\n  —— Guest 凭据 ——")
+            creds = await _resolve_and_verify_credentials(provider, vm_id)
+            if creds is None:
+                step = 2
+                continue
+            guest_user = creds.user
+            guest_password = creds.password
+            step = 4
+            continue
+
+        if step == 4:
+            print(f"\n  VM:         {vm_id}")
+            print(f"  快照:       {snapshot}")
+            print(f"  模式:       av_analyze (日志分析杀软拦截)")
+            print(f"  样本:       {sample_command}")
+            print("  分析方式:   自动识别杀软 + 日志关键字匹配")
+            confirm = input(f"  确认{confirm_action}? [y/N]: ").strip().lower()
+            if confirm == "b":
+                step = 3
+                continue
+            if confirm != "y":
+                print("  已取消")
+                return None
+
+            from vm_auto_test.models import AvAnalyzeSpec
+
+            av_spec = AvAnalyzeSpec(
+                log_collect_shell=Shell.POWERSHELL,
+            )
+            return TestCase(
+                vm_id=vm_id,
+                snapshot=snapshot,
+                mode=TestMode.AV_ANALYZE,
+                sample_command=sample_command,
+                sample_shell=Shell.CMD,
+                verify_command="",
+                verify_shell=Shell.POWERSHELL,
+                credentials=GuestCredentials(guest_user, guest_password),
+                capture_screenshot=True,
+                normalize_ignore_patterns=load_default_ignore_patterns(),
+                av_analyze=av_spec,
+            )
+
+
 async def _build_interactive_single_test_case(
     provider: VmwareProvider,
     *,
@@ -782,9 +905,10 @@ async def _build_interactive_single_test_case(
 
         if step == 2:
             print("\n  —— 选择模式 ——")
-            print("  baseline = 干净快照，验证样本是否有效（前后输出不同 → 有效）")
-            print("  av       = 带杀软快照，验证杀软能否拦截（启动后自动识别杀软环境）")
-            result = choose_value("模式", ["baseline", "av"], default="baseline")
+            print("  baseline   = 干净快照，验证样本是否有效（前后输出不同 → 有效）")
+            print("  av         = 带杀软快照，验证杀软能否拦截（启动后自动识别杀软环境）")
+            print("  av_analyze = AI分析模式：截图+日志+AI判定杀软是否拦截")
+            result = choose_value("模式", ["baseline", "av", "av_analyze"], default="baseline")
             if result is _BACK:
                 step = 1
                 continue

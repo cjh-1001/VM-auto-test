@@ -349,6 +349,34 @@ class VmrunProvider(VmwareProvider):
     async def capture_screen(self, vm_id: str, output_path: str, credentials: GuestCredentials) -> str:
         return await self._vmrun.capture_screen(vm_id, output_path, user=credentials.user, password=credentials.password)
 
+    async def copy_file_from_guest(
+        self,
+        vm_id: str,
+        guest_path: str,
+        host_path: str,
+        credentials: GuestCredentials,
+    ) -> None:
+        await self._vmrun.copy_from_guest(
+            vm_id,
+            guest_path,
+            host_path,
+            user=credentials.user,
+            password=credentials.password,
+        )
+
+    async def list_guest_directory(
+        self,
+        vm_id: str,
+        guest_path: str,
+        credentials: GuestCredentials,
+    ) -> str:
+        return await self._vmrun.list_directory(
+            vm_id,
+            guest_path,
+            user=credentials.user,
+            password=credentials.password,
+        )
+
     async def _copy_to_guest(
         self,
         vm_id: str,

@@ -27,7 +27,7 @@ It only automates execution, observation, comparison, and reporting. Do not use 
 | Single from YAML | `vm-auto-test run --config <yaml>` (preferred) |
 | Batch directory | `vm-auto-test run-dir ...` |
 | Batch CSV | `vm-auto-test run-csv ...` |
-| Create YAML | `vm-auto-test init-config --output <yaml> --mode baseline\|av` |
+| Create YAML | `vm-auto-test init-config --output <yaml> --mode baseline\|av\|av-analyze` |
 | Validate YAML | `vm-auto-test config validate --config <yaml>` |
 | Report from JSON | `vm-auto-test report --input <json> --output <file>` |
 | Real VMware smoke | `vm-auto-test-smoke` (only when explicitly requested) |
@@ -40,7 +40,7 @@ Console scripts: `vm-auto-test`, `vm-auto-test-smoke`, `vmware-mcp`.
 
 - `run --config` is the recommended config entrypoint. Do NOT mix with direct flags (`--vm`, `--mode`, `--sample-command`, `--reports-dir`); CLI rejects mixed usage.
 - Before non-interactive real runs, prefer `vm-auto-test doctor --config <yaml>` first.
-- Interactive menu: `[0] 退出` `[1] 测试单样本` `[2] 测试多样本 (CSV)` `[3] 列出 VM` `[4] 列出快照` `[5] 计划任务` `[6] 重新配置环境`
+- Interactive menu: `[0] 退出` `[1] 测试单样本` `[2] 测试多样本 (CSV)` `[3] 列出 VM` `[4] 列出快照` `[5] 计划任务` `[6] AV分析测试` `[7] 重新配置环境`
 - Plan tasks are an interactive in-memory queue: add single or CSV batch tests, set repeat counts (default 1, max 100), view/delete/clear tasks, then execute sequentially in the current session.
 - Plan tasks are not persisted and are not a background scheduler/cron. Exiting the interactive session discards the queue.
 - Plan-task execution reuses existing single/batch orchestration and reports; it must not print guest passwords.
@@ -63,6 +63,8 @@ Confirm/ask for: (1) `vmrun.exe` installed and `VMRUN_PATH` configured; (2) `.vm
 | `BASELINE_INVALID` | No effect in baseline | Fix sample path, permissions, or verification |
 | `AV_NOT_BLOCKED` | Effect still occurred under AV | Keep for defensive analysis; do not pivot to evasion |
 | `AV_BLOCKED_OR_NO_CHANGE` | No effect under AV | Distinguish blocking vs sample failure via reports/logs |
+| `AV_ANALYZE_BLOCKED` | Log changed, AV recorded new activity | AV intercepted the sample |
+| `AV_ANALYZE_NOT_BLOCKED` | Log unchanged, AV detected no threat | AV did not intercept the sample |
 
 ## Report structures
 
@@ -90,13 +92,27 @@ Multi-sample: use `samples:` array (not `sample:`). Top-level `verification` req
 
 AV optional: `baseline_result: "reports/<path>/result.json"`.
 
+AV_ANALYZE mode: `mode: av_analyze`, `av_analyze.log_sources` (optional, auto-populated from AV detection), `av_analyze.log_collect_command` (optional), `av_analyze.log_export_preset` (optional), `av_analyze.api_key_env` (optional for AI screenshot analysis). Verification is optional in this mode.
+
 ## AV detection & logs
 
-AV mode performs non-fatal process-name detection: 腾讯电脑管家 (`QQPCTray.exe`), 360 (`360Tray.exe`), 火绒 (`HipsDaemon.exe`). Configured collectors run only explicit guest commands via `av_logs.collectors`. Do not invent vendor-specific collectors.
+AV mode and AV_ANALYZE mode perform non-fatal process-name detection: 腾讯电脑管家 (`QQPCTray.exe`), 360 (`360Tray.exe`), 火绒 (`HipsDaemon.exe`). Configured collectors run only explicit guest commands via `av_logs.collectors`. Do not invent vendor-specific collectors.
+
+AV_ANALYZE mode auto-detects the AV and applies built-in log profiles:
+
+| AV | Log files | Export preset |
+|----|-----------|---------------|
+| 360安全卫士 | `360safe.Summary.dat`, `...Summary.union1` | `360` |
+| 火绒 | `HipsLogV3.db`, `HipsPolicy.db`, `HrLogV3.db`, `HrTrayMsg.db` | `huorong` |
+| 腾讯电脑管家 | `TfAvCenter.db`, `FileMon.db`, `NetFlow.db` | `tencent` |
+
+Log source paths use `{username}` placeholder, resolved at runtime via `cmd /c echo %USERNAME%` on the guest. Export scripts are in `src/vm_auto_test/av_exporters/` and dispatch via presets.
 
 ## Screenshot behavior
 
-When `--capture-screenshot` is enabled: the framework captures a screenshot 10 seconds after sample execution begins (parallel to sample run), plus a post-verification screenshot. Both go to `screenshot.png` in the report directory; the second overwrites the first if both succeed.
+When `--capture-screenshot` is enabled:
+- **AV/Baseline mode**: framework captures a screenshot 10 seconds after sample execution begins (parallel to sample run), plus a post-verification screenshot. Both go to `screenshot.png` in the report directory.
+- **AV_ANALYZE mode**: framework captures `screenshot_before.png` before sample execution and `screenshot_after.png` 10 seconds after sample execution starts (same delayed async logic as AV mode).
 
 ## Troubleshooting quick reference
 
@@ -113,6 +129,9 @@ When `--capture-screenshot` is enabled: the framework captures a screenshot 10 s
 | `run` missing args | Missing `--config` or direct args | Provide `--config <yaml>` or all direct args |
 | `run cannot combine` | Mixed `--config` + direct args | Choose one or the other |
 | `doctor` fails | Bad VMRUN_PATH/config/dir | Fix `.env` or config |
+| AV_ANALYZE no logs | AV not detected, wrong username, log files not found | Verify AV processes running, check `{username}` in paths |
+| AV_ANALYZE export empty | WAL recovery or SQLite parse issue | Check raw log files in `av_logs/after/` |
+| AV_ANALYZE false positive | Volatile headers in exported text | Already handled by `_normalize_log_for_comparison` |
 
 ## Development checks
 
@@ -137,6 +156,11 @@ When modifying only this skill document, verify against source files instead of 
 | CLI args, interactive flow, `config validate`, `report`, `run --config` | `src/vm_auto_test/cli.py` |
 | YAML/CSV schema, sample scanning | `src/vm_auto_test/config.py` |
 | Execution orchestration (incl. screenshot timing) | `src/vm_auto_test/orchestrator.py` |
+| AV process detection + log profiles | `src/vm_auto_test/av_detection.py` |
+| AV log collection from guest | `src/vm_auto_test/av_logs.py` |
+| AV log export (SQLite → text) | `src/vm_auto_test/av_exporters/` |
+| AI log + screenshot analysis | `src/vm_auto_test/analysis.py` |
+| Output comparison and classification | `src/vm_auto_test/evaluator.py` |
 | Report artifacts and schemas | `src/vm_auto_test/reporting.py` |
 | Console scripts | `pyproject.toml` |
 | User-facing docs | `README.md` |
