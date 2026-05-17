@@ -179,6 +179,51 @@ async def _run_analyzer_cli(
     )
 
 
+# ── Local Image Comparison ──────────────────────────────────────────
+
+def compare_screenshots(
+    before_path: Path,
+    after_path: Path,
+    threshold: float = 5.0,
+) -> tuple[bool, float, str]:
+    """Compare two screenshots pixel-by-pixel using Pillow.
+
+    Returns (differ_significantly, diff_percent, detail).
+    Requires Pillow.
+    """
+    from PIL import Image, ImageChops
+
+    if not before_path.exists():
+        return False, 0.0, f"before 截图不存在: {before_path}"
+    if not after_path.exists():
+        return False, 0.0, f"after 截图不存在: {after_path}"
+
+    img_before = Image.open(before_path).convert("RGB")
+    img_after = Image.open(after_path).convert("RGB")
+
+    if img_before.size != img_after.size:
+        return True, 100.0, (
+            f"截图尺寸不一致: before={img_before.size}, after={img_after.size}"
+        )
+
+    diff_img = ImageChops.difference(img_before, img_after)
+    diff_gray = diff_img.convert("L")
+    # A pixel differs if its luminance difference exceeds 30 (tolerant of
+    # compression noise / minor rendering differences)
+    diff_pixels = sum(1 for p in diff_gray.getdata() if p > 30)
+    total_pixels = diff_img.size[0] * diff_img.size[1]
+    diff_percent = round(diff_pixels / total_pixels * 100, 2)
+
+    if diff_percent >= threshold:
+        return True, diff_percent, (
+            f"截图差异显著：{diff_percent}% 像素不同（阈值 {threshold}%），"
+            f"可能出现了弹窗或界面变化"
+        )
+    return False, diff_percent, (
+        f"截图差异较小：{diff_percent}% 像素不同，无明显弹窗"
+    )
+
+
 # ── Public API ─────────────────────────────────────────────────────
 
 

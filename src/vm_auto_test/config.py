@@ -93,6 +93,8 @@ class AvAnalyzeConfig:
     screenshot_analysis_prompt: str = ""
     api_key_env: str = ""
     analyzer_command: str = ""
+    enable_image_compare: bool = False
+    image_compare_threshold: float = 5.0
 
 
 @dataclass(frozen=True)
@@ -413,6 +415,8 @@ def _parse_av_analyze(value: Any) -> AvAnalyzeConfig | None:
         screenshot_analysis_prompt=_optional_string(value, "screenshot_analysis_prompt") or "",
         api_key_env=_optional_string(value, "api_key_env") or "",
         analyzer_command=_optional_string(value, "analyzer_command") or "",
+        enable_image_compare=bool(value.get("enable_image_compare", False)),
+        image_compare_threshold=float(value.get("image_compare_threshold", 5.0)),
     )
 
 
@@ -431,6 +435,8 @@ def _to_av_analyze_spec(config: AvAnalyzeConfig | None) -> AvAnalyzeSpec | None:
         screenshot_analysis_prompt=config.screenshot_analysis_prompt,
         api_key_env=config.api_key_env,
         analyzer_command=config.analyzer_command,
+        enable_image_compare=config.enable_image_compare,
+        image_compare_threshold=config.image_compare_threshold,
     )
 
 
@@ -498,6 +504,9 @@ def _av_analyze_to_yaml(config: AvAnalyzeConfig) -> dict[str, Any]:
         data["api_key_env"] = config.api_key_env
     if config.analyzer_command:
         data["analyzer_command"] = config.analyzer_command
+    if config.enable_image_compare:
+        data["enable_image_compare"] = True
+        data["image_compare_threshold"] = config.image_compare_threshold
     return data
 
 
@@ -651,6 +660,7 @@ def scan_samples_from_directory(
 def parse_csv_samples(
     csv_path: Path,
     samples_base_dir: str | None = None,
+    mode: str | None = None,
 ) -> tuple[SampleConfig, ...]:
     import csv
     import io
@@ -672,20 +682,30 @@ def parse_csv_samples(
     if not rows:
         raise ValueError("No data rows in CSV")
 
+    is_av_analyze = mode == "av_analyze"
+    min_cols = 1 if is_av_analyze else 3
+
     samples: list[SampleConfig] = []
     for row_index, row in enumerate(rows, start=2):
-        if len(row) < 3:
-            raise ValueError(f"Row {row_index}: expected 3 columns (sample_file, verify_command, verify_shell), got {len(row)}")
+        if len(row) < min_cols:
+            expected = "1 column (sample_file)" if is_av_analyze else "3 columns (sample_file, verify_command, verify_shell)"
+            raise ValueError(f"Row {row_index}: expected {expected}, got {len(row)}")
         sample_file = row[0].strip()
-        verify_command = row[1].strip()
-        verify_shell_str = row[2].strip().lower()
+
+        if is_av_analyze:
+            verify_command = ""
+            verify_shell_str = ""
+        else:
+            verify_command = row[1].strip()
+            verify_shell_str = row[2].strip().lower()
 
         if not sample_file:
             raise ValueError(f"Row {row_index}: sample_file is empty")
-        if verify_shell_str not in {"cmd", "powershell", ""}:
-            raise ValueError(f"Row {row_index}: verify_shell must be 'cmd' or 'powershell', got '{verify_shell_str}'")
-        if not verify_command and verify_shell_str:
-            raise ValueError(f"Row {row_index}: verify_command is empty")
+        if not is_av_analyze:
+            if verify_shell_str not in {"cmd", "powershell", ""}:
+                raise ValueError(f"Row {row_index}: verify_shell must be 'cmd' or 'powershell', got '{verify_shell_str}'")
+            if not verify_command and verify_shell_str:
+                raise ValueError(f"Row {row_index}: verify_command is empty")
 
         sample_path = Path(sample_file)
         if sample_path.is_absolute():
@@ -697,15 +717,16 @@ def parse_csv_samples(
 
         sample_id = _safe_sample_id(sample_file)
 
+        verification = None if is_av_analyze else VerificationConfig(
+            command=verify_command,
+            shell=Shell(verify_shell_str),
+        )
         samples.append(
             SampleConfig(
                 id=sample_id,
                 command=command,
                 shell=Shell.CMD,
-                verification=VerificationConfig(
-                    command=verify_command,
-                    shell=Shell(verify_shell_str),
-                ),
+                verification=verification,
             )
         )
 

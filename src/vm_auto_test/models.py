@@ -136,6 +136,8 @@ class AvAnalyzeSpec:
     screenshot_analysis_prompt: str = ""
     api_key_env: str = ""
     analyzer_command: str = ""
+    enable_image_compare: bool = False
+    image_compare_threshold: float = 5.0
 
 
 @dataclass(frozen=True)

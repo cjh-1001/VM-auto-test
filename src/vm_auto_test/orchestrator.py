@@ -10,7 +10,7 @@ from pathlib import Path
 from collections.abc import Sequence
 from typing import TypeVar
 
-from vm_auto_test.analysis import run_analysis
+from vm_auto_test.analysis import compare_screenshots, run_analysis
 from vm_auto_test.av_detection import build_detection_command, parse_detection_result
 from vm_auto_test.av_logs import collect_av_logs
 from vm_auto_test.evaluator import classify_result, evaluate_output
@@ -827,6 +827,26 @@ class TestOrchestrator:
                 log_detail="日志有变化（与样本执行前对比），杀软记录了新活动",
                 classification=Classification.AV_ANALYZE_BLOCKED,
             )
+        elif test_case.av_analyze.enable_image_compare:
+            self._stage = "截图对比"
+            changed, diff_pct, detail = compare_screenshots(
+                Path(before_screenshot_path), Path(after_screenshot_path),
+                test_case.av_analyze.image_compare_threshold,
+            )
+            if changed:
+                av_analyze_result = AvAnalyzeResult(
+                    log_found=False,
+                    log_detail=detail,
+                    screenshot_analysis=detail,
+                    classification=Classification.AV_ANALYZE_BLOCKED,
+                )
+            else:
+                av_analyze_result = AvAnalyzeResult(
+                    log_found=False,
+                    log_detail=detail,
+                    screenshot_analysis=detail,
+                    classification=Classification.AV_ANALYZE_NOT_BLOCKED,
+                )
         else:
             av_analyze_result = AvAnalyzeResult(
                 log_found=False,
@@ -844,9 +864,9 @@ class TestOrchestrator:
         result = TestResult(
             test_case=test_case,
             report_dir=str(report_dir),
-            before=CommandResult(command="screenshot"),
+            before=CommandResult(command="log_collect", stdout=before_log_content),
             sample=sample,
-            after=CommandResult(command="screenshot"),
+            after=CommandResult(command="log_collect", stdout=after_log_content),
             changed=av_analyze_result.classification == Classification.AV_ANALYZE_NOT_BLOCKED,
             classification=av_analyze_result.classification,
             steps=tuple(steps),
@@ -949,6 +969,26 @@ class TestOrchestrator:
                 log_detail="日志有变化（与样本执行前对比），杀软记录了新活动",
                 classification=Classification.AV_ANALYZE_BLOCKED,
             )
+        elif test_case.av_analyze.enable_image_compare:
+            self._stage = "截图对比"
+            changed, diff_pct, detail = compare_screenshots(
+                Path(before_screenshot_path), Path(after_screenshot_path),
+                test_case.av_analyze.image_compare_threshold,
+            )
+            if changed:
+                av_analyze_result = AvAnalyzeResult(
+                    log_found=False,
+                    log_detail=detail,
+                    screenshot_analysis=detail,
+                    classification=Classification.AV_ANALYZE_BLOCKED,
+                )
+            else:
+                av_analyze_result = AvAnalyzeResult(
+                    log_found=False,
+                    log_detail=detail,
+                    screenshot_analysis=detail,
+                    classification=Classification.AV_ANALYZE_NOT_BLOCKED,
+                )
         else:
             av_analyze_result = AvAnalyzeResult(
                 log_found=False,
@@ -968,9 +1008,9 @@ class TestOrchestrator:
             test_case=test_case,
             sample_spec=sample,
             report_dir=str(report_dir),
-            before=CommandResult(command="screenshot"),
+            before=CommandResult(command="log_collect", stdout=before_log_content),
             sample=sample_result,
-            after=CommandResult(command="screenshot"),
+            after=CommandResult(command="log_collect", stdout=after_log_content),
             evaluation=EvaluationResult(
                 changed=logs_changed,
                 effect_observed=logs_changed,

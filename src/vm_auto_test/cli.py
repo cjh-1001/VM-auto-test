@@ -530,15 +530,14 @@ async def _interactive_menu(provider: VmwareProvider, env_file: Path) -> None:
         print("  [3] 列出 VM")
         print("  [4] 列出快照")
         print("  [5] 计划任务")
-        print("  [6] AV分析测试 (AI+截图)")
-        print("  [7] 重新配置环境")
+        print("  [6] 重新配置环境")
         choice = input("\n  > ").strip()
 
         if choice == "0":
             print("  已退出")
             return
 
-        if choice == "7":
+        if choice == "6":
             await _interactive_setup(env_file)
             continue
 
@@ -570,8 +569,6 @@ async def _interactive_menu(provider: VmwareProvider, env_file: Path) -> None:
             await _interactive_single(provider)
         elif choice == "2":
             await _interactive_csv(provider)
-        elif choice == "6":
-            await _interactive_av_analyze(provider)
         else:
             print("  无效选项")
 
@@ -817,6 +814,9 @@ async def _build_interactive_av_analyze_test_case(
             print(f"  模式:       av_analyze (日志分析杀软拦截)")
             print(f"  样本:       {sample_command}")
             print("  分析方式:   自动识别杀软 + 日志关键字匹配")
+            enable_img = input("  启用本地截图对比（像素级对比检测弹窗，无需API）? [y/N]: ").strip().lower() == "y"
+            if enable_img:
+                print("  截图对比:   已启用")
             confirm = input(f"  确认{confirm_action}? [y/N]: ").strip().lower()
             if confirm == "b":
                 step = 3
@@ -829,6 +829,7 @@ async def _build_interactive_av_analyze_test_case(
 
             av_spec = AvAnalyzeSpec(
                 log_collect_shell=Shell.POWERSHELL,
+                enable_image_compare=enable_img,
             )
             return TestCase(
                 vm_id=vm_id,
@@ -924,7 +925,12 @@ async def _build_interactive_single_test_case(
                 continue
             sample_command = result
             sample_shell = Shell.CMD
-            step = 4
+            if mode == TestMode.AV_ANALYZE:
+                step = 5
+                verify_command = ""
+                verify_shell = Shell.POWERSHELL
+            else:
+                step = 4
             continue
 
         if step == 4:
@@ -946,32 +952,60 @@ async def _build_interactive_single_test_case(
             print("\n  —— Guest 凭据 ——")
             creds = await _resolve_and_verify_credentials(provider, vm_id)
             if creds is None:
-                step = 4
+                step = 3 if mode == TestMode.AV_ANALYZE else 4
                 continue
             guest_user = creds.user
             guest_password = creds.password
-            resolved = await _resolve_env_vars_in_command(provider, vm_id, verify_command, creds)
-            if resolved != verify_command:
-                verify_command = resolved
+            if mode != TestMode.AV_ANALYZE:
+                resolved = await _resolve_env_vars_in_command(provider, vm_id, verify_command, creds)
+                if resolved != verify_command:
+                    verify_command = resolved
             step = 6
             continue
 
         if step == 6:
-            capture_screenshot = input("  截取 VM 截图? [y/N]: ").strip().lower() == "y"
+            if mode == TestMode.AV_ANALYZE:
+                capture_screenshot = True
+                enable_img = input("  启用本地截图对比（像素级对比检测弹窗，无需API）? [y/N]: ").strip().lower() == "y"
+            else:
+                capture_screenshot = input("  截取 VM 截图? [y/N]: ").strip().lower() == "y"
+                enable_img = False
             print(f"\n  VM:       {vm_id}")
             print(f"  快照:     {snapshot}")
             print(f"  模式:     {mode.value}")
             print(f"  样本:     [{sample_shell.value}] {sample_command}")
-            print(f"  验证:     [{verify_shell.value}] {verify_command}")
+            if mode != TestMode.AV_ANALYZE:
+                print(f"  验证:     [{verify_shell.value}] {verify_command}")
             if capture_screenshot:
                 print("  截图:     是")
+            if enable_img:
+                print("  截图对比:   已启用")
             confirm = input(f"  确认{confirm_action}? [y/N]: ").strip().lower()
             if confirm == "b":
-                step = 5
+                step = 3 if mode == TestMode.AV_ANALYZE else 5
                 continue
             if confirm != "y":
                 print("  已取消")
                 return None
+
+            if mode == TestMode.AV_ANALYZE:
+                av_spec = AvAnalyzeSpec(
+                    log_collect_shell=Shell.POWERSHELL,
+                    enable_image_compare=enable_img,
+                )
+                return TestCase(
+                    vm_id=vm_id,
+                    snapshot=snapshot,
+                    mode=mode,
+                    sample_command=sample_command,
+                    sample_shell=sample_shell,
+                    verify_command="",
+                    verify_shell=Shell.POWERSHELL,
+                    credentials=GuestCredentials(guest_user, guest_password),
+                    capture_screenshot=True,
+                    normalize_ignore_patterns=load_default_ignore_patterns(),
+                    av_analyze=av_spec,
+                )
 
             return TestCase(
                 vm_id=vm_id,
@@ -1059,9 +1093,10 @@ async def _build_interactive_csv_test_case(
 
         if step == 2:
             print("\n  —— 选择模式 ——")
-            print("  baseline = 干净快照，验证样本是否有效（前后输出不同 → 有效）")
-            print("  av       = 带杀软快照，验证杀软能否拦截")
-            result = choose_value("模式", ["baseline", "av"], default="baseline")
+            print("  baseline   = 干净快照，验证样本是否有效（前后输出不同 → 有效）")
+            print("  av         = 带杀软快照，验证杀软能否拦截")
+            print("  av_analyze = AI分析模式：截图+日志+AI判定杀软是否拦截")
+            result = choose_value("模式", ["baseline", "av", "av_analyze"], default="baseline")
             if result is _BACK:
                 step = 1
                 continue
@@ -1071,6 +1106,8 @@ async def _build_interactive_csv_test_case(
 
         if step == 3:
             print("\n  —— CSV 配置 ——")
+            if mode == TestMode.AV_ANALYZE:
+                print("  av_analyze 模式：CSV 只需要一列 sample_file，无需验证命令")
             result = _prompt_back("CSV 文件路径")
             if result is None:
                 step = 2
@@ -1102,25 +1139,32 @@ async def _build_interactive_csv_test_case(
             continue
 
         if step == 5:
-            sample_configs_raw = parse_csv_samples(csv_path, samples_base_dir=samples_base_dir)
-            creds_obj = GuestCredentials(guest_user, guest_password)
-            sample_configs: list[SampleConfig] = []
-            for cfg in sample_configs_raw:
-                verification = cfg.verification
-                if cfg.verification and cfg.verification.command:
-                    resolved_cmd = await _resolve_env_vars_in_command(provider, vm_id, cfg.verification.command, creds_obj)
-                    if resolved_cmd != cfg.verification.command:
-                        verification = VerificationConfig(command=resolved_cmd, shell=cfg.verification.shell)
-                sample_configs.append(SampleConfig(id=cfg.id, command=cfg.command, shell=cfg.shell, verification=verification))
+            sample_configs_raw = parse_csv_samples(csv_path, samples_base_dir=samples_base_dir, mode=mode.value)
+            if mode != TestMode.AV_ANALYZE:
+                creds_obj = GuestCredentials(guest_user, guest_password)
+                sample_configs: list[SampleConfig] = []
+                for cfg in sample_configs_raw:
+                    verification = cfg.verification
+                    if cfg.verification and cfg.verification.command:
+                        resolved_cmd = await _resolve_env_vars_in_command(provider, vm_id, cfg.verification.command, creds_obj)
+                        if resolved_cmd != cfg.verification.command:
+                            verification = VerificationConfig(command=resolved_cmd, shell=cfg.verification.shell)
+                    sample_configs.append(SampleConfig(id=cfg.id, command=cfg.command, shell=cfg.shell, verification=verification))
+            else:
+                sample_configs = list(sample_configs_raw)
 
             print(f"\n  从 CSV 读取 {len(sample_configs)} 个样本:")
             for cfg in sample_configs:
                 print(f"    [{cfg.shell.value}] {cfg.command}")
-                print(f"      verify: [{cfg.verification.shell.value}] {cfg.verification.command}")
+                if cfg.verification:
+                    print(f"      verify: [{cfg.verification.shell.value}] {cfg.verification.command}")
             print(f"  VM:       {vm_id}")
             print(f"  快照:     {snapshot}")
             print(f"  模式:     {mode.value}")
-            capture_screenshot = input("  截取 VM 截图? [y/N]: ").strip().lower() == "y"
+            if mode == TestMode.AV_ANALYZE:
+                capture_screenshot = True
+            else:
+                capture_screenshot = input("  截取 VM 截图? [y/N]: ").strip().lower() == "y"
             if capture_screenshot:
                 print("  截图:     是")
             confirm = input(f"  确认{confirm_action}? [y/N]: ").strip().lower()
@@ -1136,10 +1180,28 @@ async def _build_interactive_csv_test_case(
                     id=cfg.id,
                     command=cfg.command,
                     shell=cfg.shell,
-                    verification=VerificationSpec(command=cfg.verification.command, shell=cfg.verification.shell),
+                    verification=VerificationSpec(command=cfg.verification.command, shell=cfg.verification.shell) if cfg.verification else None,
                 )
                 for cfg in sample_configs
             )
+
+            if mode == TestMode.AV_ANALYZE:
+                av_spec = AvAnalyzeSpec(log_collect_shell=Shell.POWERSHELL)
+                return TestCase(
+                    vm_id=vm_id,
+                    snapshot=snapshot,
+                    mode=mode,
+                    sample_command=sample_configs[0].command,
+                    sample_shell=sample_configs[0].shell,
+                    verify_command="",
+                    verify_shell=Shell.POWERSHELL,
+                    credentials=GuestCredentials(guest_user, guest_password),
+                    samples=sample_specs,
+                    capture_screenshot=True,
+                    normalize_ignore_patterns=load_default_ignore_patterns(),
+                    av_analyze=av_spec,
+                )
+
             first_v = sample_specs[0].verification
             return TestCase(
                 vm_id=vm_id,

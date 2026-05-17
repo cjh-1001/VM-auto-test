@@ -154,9 +154,11 @@ def to_batch_report_dict(result: BatchTestResult) -> dict[str, Any]:
                 "classification": sample.classification.value,
                 "changed": sample.changed,
                 "effect_observed": sample.evaluation.effect_observed,
+                "sample_command": sample.sample_spec.command,
                 "report_dir": _relative_sample_report_dir(result, sample),
                 "steps": [asdict(step) for step in sample.steps],
                 "duration_seconds": round(sample.duration_seconds, 2),
+                "av_analyze_result": _av_analyze_dict(sample.av_analyze_result),
             }
             for sample in result.samples
         ],
@@ -184,6 +186,7 @@ _BATCH_CSV_FIELDS = (
     "before_capture_method",
     "after_capture_method",
     "av_log_count",
+    "av_analyze_log_found",
     "report_dir",
     "duration_seconds",
 )
@@ -225,6 +228,7 @@ def _batch_csv_rows(result: BatchTestResult) -> list[dict[str, Any]]:
                 "before_capture_method": sample.before.capture_method,
                 "after_capture_method": sample.after.capture_method,
                 "av_log_count": len(sample.logs),
+                "av_analyze_log_found": _bool_text(sample.av_analyze_result.log_found) if sample.av_analyze_result else "",
                 "report_dir": _relative_sample_report_dir(result, sample),
                 "duration_seconds": round(sample.duration_seconds, 2),
             }
@@ -298,7 +302,10 @@ def _write_batch_html(result: BatchTestResult, report_dir: Path) -> None:
             </div>
 """
 
+    is_av_analyze = result.test_case.mode.value == "av_analyze"
     sample_rows = "\n".join(_sample_html_row(result, sample, report_dir) for sample in result.samples)
+
+    analysis_col_header = '<th data-sort="ai">AI分析 <span class="sort-arrow">⇅</span></th>' if is_av_analyze else ""
 
     html_text = f"""<!doctype html>
 <html lang="zh-CN">
@@ -438,6 +445,12 @@ def _write_batch_html(result: BatchTestResult, report_dir: Path) -> None:
     .badge-pass .badge-dot{{background:#0d9488}}
     .badge-fail .badge-dot{{background:#e74c3c}}
 
+    /* ── AI badge ── */
+    .ai-badge{{
+      display:inline-block;max-width:180px;overflow:hidden;text-overflow:ellipsis;
+      white-space:nowrap;font-size:0.72rem;color:#6366f1;
+      background:#eef2ff;padding:0.15rem 0.5rem;border-radius:4px;cursor:default
+    }}
     /* ── Effect icon ── */
     .effect-cell{{text-align:center}}
     .effect-yes{{color:#0d9488;font-weight:700;font-size:1rem}}
@@ -651,6 +664,7 @@ def _write_batch_html(result: BatchTestResult, report_dir: Path) -> None:
             <th data-sort="fx">效果发生 <span class="sort-arrow">⇅</span></th>
             <th data-sort="sc">样本命令 <span class="sort-arrow">⇅</span></th>
             <th data-sort="vc">验证命令 <span class="sort-arrow">⇅</span></th>
+{analysis_col_header}
             <th data-sort="dur">用时 <span class="sort-arrow">⇅</span></th>
             <th>产出文件</th>
           </tr>
@@ -705,7 +719,7 @@ def _write_batch_html(result: BatchTestResult, report_dir: Path) -> None:
         rows.forEach(function(r){{tbody.appendChild(r)}});
       }});
       function getCell(row,col){{
-        var map={{id:0,class:1,fx:2,sc:3,vc:4,dur:5}};
+        var map={{"id:0,class:1,fx:2,sc:3,vc:4" + (",ai:5,dur:6" if is_av_analyze else ",dur:5")}};
         var i=map[col]!=null?map[col]:0;
         var td=row.children[i];
         return(td?td.textContent.trim():'');
@@ -810,25 +824,52 @@ def _sample_html_row(result: BatchTestResult, sample: SampleTestResult, report_d
     label = _html_escape(_html_label(classification_value))
     row_class = _HTML_ROW_CLASS.get(classification_value, "")
     badge_class = "badge-pass" if row_class == "row-pass" else "badge-fail"
+    is_av_analyze = result.test_case.mode.value == "av_analyze"
 
     effect = sample.evaluation.effect_observed
     effect_html = '<span class="effect-yes">✓</span>' if effect else '<span class="effect-no">—</span>'
 
-    artifact_links = [
-        _html_link(f"{relative_dir}/result.json", "result.json"),
-        _html_link(f"{relative_dir}/before.txt", "before.txt"),
-        _html_link(f"{relative_dir}/after.txt", "after.txt"),
-        _html_link(f"{relative_dir}/sample_stdout.txt", "stdout"),
-        _html_link(f"{relative_dir}/sample_stderr.txt", "stderr"),
-    ]
-    screenshot_path = Path(sample.report_dir) / "screenshot.png"
-    if screenshot_path.exists():
-        artifact_links.append(_html_link(f"{relative_dir}/screenshot.png", "screenshot"))
+    artifact_links = []
+    if is_av_analyze:
+        artifact_links = [
+            _html_link(f"{relative_dir}/result.json", "result.json"),
+            _html_link(f"{relative_dir}/before.txt", "before.txt"),
+            _html_link(f"{relative_dir}/after.txt", "after.txt"),
+        ]
+        before_ss = Path(sample.report_dir) / "screenshot_before.png"
+        after_ss = Path(sample.report_dir) / "screenshot_after.png"
+        if before_ss.exists():
+            artifact_links.append(_html_link(f"{relative_dir}/screenshot_before.png", "screenshot_before"))
+        if after_ss.exists():
+            artifact_links.append(_html_link(f"{relative_dir}/screenshot_after.png", "screenshot_after"))
+    else:
+        artifact_links = [
+            _html_link(f"{relative_dir}/result.json", "result.json"),
+            _html_link(f"{relative_dir}/before.txt", "before.txt"),
+            _html_link(f"{relative_dir}/after.txt", "after.txt"),
+            _html_link(f"{relative_dir}/sample_stdout.txt", "stdout"),
+            _html_link(f"{relative_dir}/sample_stderr.txt", "stderr"),
+        ]
+        screenshot_path = Path(sample.report_dir) / "screenshot.png"
+        if screenshot_path.exists():
+            artifact_links.append(_html_link(f"{relative_dir}/screenshot.png", "screenshot"))
 
     sample_cmd = _html_escape(sample.sample_spec.command)
-    verify_cmd = _html_escape(verification.command)
+    verify_cmd = _html_escape(verification.command) if verification.command else "—"
 
     duration_str = _format_duration(sample.duration_seconds)
+
+    analysis_cell = ""
+    if is_av_analyze and sample.av_analyze_result:
+        ar = sample.av_analyze_result
+        detail = ar.log_detail or ar.screenshot_analysis or ""
+        summary = _html_escape(detail[:80] + ("…" if len(detail) > 80 else ""))
+        if summary:
+            analysis_cell = f'<td><span class="ai-badge" title="{_html_escape(detail)}">{summary}</span></td>'
+        else:
+            analysis_cell = "<td>—</td>"
+    elif is_av_analyze:
+        analysis_cell = "<td>—</td>"
 
     return f"""        <tr class="{row_class}">
           <td><strong>{_html_escape(sample.sample_spec.id)}</strong></td>
@@ -836,6 +877,7 @@ def _sample_html_row(result: BatchTestResult, sample: SampleTestResult, report_d
           <td class="effect-cell">{effect_html}</td>
           <td class="cmd"><div class="cmd-wrapper"><code title="{sample_cmd}">{sample_cmd}</code><button class="btn-copy" title="复制">⎘</button></div></td>
           <td class="cmd"><div class="cmd-wrapper"><code title="{verify_cmd}">{verify_cmd}</code><button class="btn-copy" title="复制">⎘</button></div></td>
+          {analysis_cell}
           <td>{duration_str}</td>
           <td><div class="artifact-links">{"".join(artifact_links)}</div></td>
         </tr>"""
