@@ -106,7 +106,7 @@ AV_ANALYZE mode auto-detects the AV and applies built-in log profiles:
 | 火绒 | `HipsLogV3.db`, `HipsPolicy.db`, `HrLogV3.db`, `HrTrayMsg.db` | `huorong` |
 | 腾讯电脑管家 | `TfAvCenter.db`, `FileMon.db`, `NetFlow.db` | `tencent` |
 
-Log source paths use `{username}` placeholder, resolved at runtime via `cmd /c echo %USERNAME%` on the guest. Export scripts are in `src/vm_auto_test/av_exporters/` and dispatch via presets.
+Log source paths use `{username}` placeholder, resolved at runtime via `cmd /c echo %USERNAME%` on the guest. Per-AV export scripts are in `scripts/av_logs/`; shared infrastructure is in `src/vm_auto_test/av_exporters/`.
 
 ## Screenshot behavior
 
@@ -159,7 +159,8 @@ When modifying only this skill document, verify against source files instead of 
 | Execution orchestration (incl. screenshot timing, av_analyze dual-track) | `src/vm_auto_test/orchestrator.py` |
 | AV process detection + log profiles | `src/vm_auto_test/av_detection.py` |
 | AV log collection from guest | `src/vm_auto_test/av_logs.py` |
-| AV log export (SQLite → text) | `src/vm_auto_test/av_exporters/` |
+| AV log export infrastructure (SQLite helpers, presets) | `src/vm_auto_test/av_exporters/` |
+| Per-AV export profiles (360/火绒/腾讯) | `scripts/av_logs/` |
 | AI log + screenshot analysis, pixel-level image comparison | `src/vm_auto_test/analysis.py` |
 | Output comparison and classification | `src/vm_auto_test/evaluator.py` |
 | Report artifacts and schemas | `src/vm_auto_test/reporting.py` |

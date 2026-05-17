@@ -472,7 +472,7 @@ pytest
 python -m compileall -q src tests
 ```
 
-当前 125 个测试，使用 fake provider，不需真实 VMware 环境。`vm-auto-test-smoke` 仅确认需要时运行。
+测试使用 fake provider，不需真实 VMware 环境。`vm-auto-test-smoke` 仅确认需要时运行。
 
 Provider 状态：`vmrun` 已实现（默认）；`vsphere`/`powercli`/`mcp` 占位待实现。
 
@@ -490,12 +490,9 @@ src/
     ├── analysis.py          # AI 日志分析和截图分析
     ├── av_detection.py      # AV 进程检测 + 日志源配置
     ├── av_logs.py           # AV 日志采集
-    ├── av_exporters/        # AV 日志导出（360/火绒/腾讯电脑管家）
-    │   ├── common.py        # 共享工具（SQLite 导出、编码处理）
-    │   ├── presets.py       # 预设调度
-    │   ├── export_360.py    # 360 日志导出
-    │   ├── export_huorong.py # 火绒日志导出
-    │   └── export_tencent.py # 腾讯电脑管家日志导出
+    ├── av_exporters/        # AV 日志导出基础设施（SQLite 工具、预设调度）
+    │   ├── common.py
+    │   └── presets.py
     ├── smoke.py             # 真实 VMware smoke test
     └── providers/
         ├── base.py / factory.py / vmrun_provider.py

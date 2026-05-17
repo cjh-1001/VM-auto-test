@@ -325,6 +325,8 @@ def _write_batch_html(result: BatchTestResult, report_dir: Path, output_path: Pa
     is_av_analyze = result.test_case.mode.value == "av_analyze"
     sample_rows = "\n".join(_sample_html_row(result, sample, report_dir) for sample in result.samples)
 
+    _sort_map = '"id:0,class:1,fx:2,sc:3,log:4,img:5,dur:6"' if is_av_analyze else '"id:0,class:1,fx:2,sc:3,vc:4,dur:5"'
+
     if is_av_analyze:
         table_headers = """            <th data-sort="id">样本 ID <span class="sort-arrow">⇅</span></th>
             <th data-sort="log">日志分析 <span class="sort-arrow">⇅</span></th>
@@ -341,6 +343,8 @@ def _write_batch_html(result: BatchTestResult, report_dir: Path, output_path: Pa
             <th data-sort="vc">验证命令 <span class="sort-arrow">⇅</span></th>
             <th data-sort="dur">用时 <span class="sort-arrow">⇅</span></th>
             <th>产出文件</th>"""
+
+    embedded_files_script = _build_embedded_files_script(result, report_dir)
 
     html_text = f"""<!doctype html>
 <html lang="zh-CN">
@@ -406,7 +410,7 @@ def _write_batch_html(result: BatchTestResult, report_dir: Path, output_path: Pa
     .ring-center .pct-label{{font-size:0.62rem;color:#64748b;text-transform:uppercase;letter-spacing:0.06em;margin-top:0.1rem}}
     .ring-legend{{display:flex;gap:1rem;margin-top:0.75rem;font-size:0.7rem;font-weight:600}}
     .ring-legend .lg-pass{{color:#0d9488}}
-    .ring-legend .lg-fail{{color:#e74c3c}}
+    .ring-legend .lg-fail{{color:#94a3b8}}
 
     .info-panel{{
       display:flex;flex-direction:column;gap:0.75rem
@@ -562,7 +566,7 @@ def _write_batch_html(result: BatchTestResult, report_dir: Path, output_path: Pa
     }}
     .drawer-overlay.open{{opacity:1;visibility:visible}}
     .drawer{{
-      position:fixed;top:0;right:0;width:440px;max-width:100vw;height:100vh;
+      position:fixed;top:0;right:0;width:42vw;min-width:420px;max-width:100vw;height:100vh;
       background:#fff;z-index:1001;box-shadow:-4px 0 24px rgba(0,0,0,0.12);
       display:flex;flex-direction:column;
       transform:translateX(100%);transition:transform .28s cubic-bezier(0.16,1,0.3,1)
@@ -605,6 +609,27 @@ def _write_batch_html(result: BatchTestResult, report_dir: Path, output_path: Pa
     }}
     @keyframes spin{{to{{transform:rotate(360deg)}}}}
     .drawer-error{{color:#b91c1c;text-align:center;padding:2rem 1rem;font-size:0.82rem}}
+    .drawer-body .img-container{{
+      display:flex;align-items:center;justify-content:center;min-height:160px
+    }}
+    .drawer-body .img-container img{{
+      max-width:100%;height:auto;border-radius:6px;box-shadow:0 1px 4px rgba(0,0,0,0.08);cursor:zoom-in;transition:transform .2s
+    }}
+    .drawer-body .img-container img:hover{{transform:scale(1.02)}}
+    .img-zoom-overlay{{
+      position:fixed;inset:0;background:rgba(0,0,0,0.82);z-index:2000;
+      display:flex;align-items:center;justify-content:center;cursor:zoom-out;
+      opacity:0;visibility:hidden;transition:opacity .22s ease,visibility .22s ease
+    }}
+    .img-zoom-overlay.open{{opacity:1;visibility:visible}}
+    .img-zoom-overlay img{{
+      max-width:93vw;max-height:93vh;object-fit:contain;border-radius:4px;box-shadow:0 8px 40px rgba(0,0,0,0.5)
+    }}
+    .json-key{{color:#0369a1}}
+    .json-string{{color:#059669}}
+    .json-bool{{color:#7c3aed}}
+    .json-null{{color:#94a3b8}}
+    .json-num{{color:#d97706}}
 
     @media(max-width:640px){{
       .drawer{{width:100vw}}
@@ -724,7 +749,9 @@ def _write_batch_html(result: BatchTestResult, report_dir: Path, output_path: Pa
     </div>
     <div class="drawer-body" id="drawerBody"></div>
   </div>
+  <div class="img-zoom-overlay" id="imgZoomOverlay"><img id="imgZoomImg" src="" alt="" /></div>
 
+  {embedded_files_script}
   <script>
     // ── Table sorting ──
     (function(){{
@@ -750,7 +777,7 @@ def _write_batch_html(result: BatchTestResult, report_dir: Path, output_path: Pa
         rows.forEach(function(r){{tbody.appendChild(r)}});
       }});
       function getCell(row,col){{
-        var map={{"id:0,class:1,fx:2,sc:3" + (",log:1,img:2,verdict:3,sc:4,dur:5" if is_av_analyze else ",vc:4,dur:5")}};
+        var map={_sort_map};
         var i=map[col]!=null?map[col]:0;
         var td=row.children[i];
         return(td?td.textContent.trim():'');
@@ -778,35 +805,102 @@ def _write_batch_html(result: BatchTestResult, report_dir: Path, output_path: Pa
       var titleEl=document.getElementById('drawerTitle');
       var bodyEl=document.getElementById('drawerBody');
       var closeBtn=document.getElementById('drawerClose');
+      var zoomOverlay=document.getElementById('imgZoomOverlay');
+      var zoomImg=document.getElementById('imgZoomImg');
       var openHref=null;
+      var activeXhr=null;
+
       function open(href,label){{
         if(openHref===href)return;
+        if(activeXhr)activeXhr.abort();
         openHref=href;
         titleEl.textContent=label;
         bodyEl.innerHTML='<div class="drawer-loading"><span class="spinner"></span>加载中…</div>';
         overlay.classList.add('open');
         drawer.classList.add('open');
-        var h=_esc(href);
-        var l=_esc(label);
+        document.body.style.overflow='hidden';
+
         if(/\\.(png|jpg|jpeg|gif|webp|svg|bmp|ico)$/i.test(href)){{
-          bodyEl.innerHTML='<img src="'+h+'" alt="'+l+'" />';
-        }}else{{
-          bodyEl.innerHTML='<iframe src="'+h+'" style="width:100%;height:100%;border:none;background:#fff"></iframe>';
+          var h=_esc(href);
+          bodyEl.innerHTML='<div class="img-container"><img src="'+h+'" alt="'+_esc(label)+'" title="点击放大" /></div>';
+          var imgEl=bodyEl.querySelector('img');
+          if(imgEl){{
+            imgEl.addEventListener('click',function(){{
+              zoomImg.src=this.src;
+              zoomImg.alt=this.alt;
+              zoomOverlay.classList.add('open');
+              document.body.style.overflow='hidden';
+            }});
+          }}
+          return;
         }}
+
+        if(window.__EMBEDDED__&&window.__EMBEDDED__.hasOwnProperty(href)){{
+          var content=window.__EMBEDDED__[href];
+          if(/\\.json$/i.test(href)){{
+            bodyEl.innerHTML='<pre>'+_jsonHighlight(_escCode(content))+'</pre>';
+          }}else{{
+            bodyEl.innerHTML='<pre>'+_escCode(content)+'</pre>';
+          }}
+          return;
+        }}
+
+        var isJson=/\\.json$/i.test(href);
+        if(!isJson){{
+          bodyEl.innerHTML='<iframe src="'+_esc(href)+'" style="width:100%;height:100%;border:none;background:#fff"></iframe>';
+          return;
+        }}
+
+        activeXhr=new XMLHttpRequest();
+        activeXhr.onload=function(){{
+          if(activeXhr.status===200||(activeXhr.status===0&&activeXhr.responseText)){{
+            bodyEl.innerHTML='<pre>'+_jsonHighlight(_escCode(activeXhr.responseText))+'</pre>';
+          }}else{{
+            bodyEl.innerHTML='<iframe src="'+_esc(href)+'" style="width:100%;height:100%;border:none;background:#fff"></iframe>';
+          }}
+        }};
+        activeXhr.onerror=function(){{
+          bodyEl.innerHTML='<iframe src="'+_esc(href)+'" style="width:100%;height:100%;border:none;background:#fff"></iframe>';
+        }};
+        activeXhr.open('GET',href,true);
+        activeXhr.send();
       }}
 
       function close(){{
+        if(activeXhr)activeXhr.abort();
         overlay.classList.remove('open');
         drawer.classList.remove('open');
+        zoomOverlay.classList.remove('open');
         openHref=null;
+        activeXhr=null;
+        document.body.style.overflow='';
       }}
 
       function _esc(s){{return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}}
+      function _escCode(s){{return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}}
 
-      document.querySelectorAll('.artifact-links a').forEach(function(a){{
+      function _jsonHighlight(text){{
+        var span=function(cls,m){{return '<span class="'+cls+'">'+m+'</span>';}};
+        return text
+          .replace(/("(?:[^"\\\\]|\\\\.)*")\\s*:/g,function(m){{return span('json-key',m.slice(0,m.length-1))+':'}})
+          .replace(/:\\s*("(?:[^"\\\\]|\\\\.)*")/g,': '+span('json-string','$1'))
+          .replace(/:\\s*(true|false)/g,': '+span('json-bool','$1'))
+          .replace(/:\\s*(null)/g,': '+span('json-null','$1'))
+          .replace(/:\\s*(-?\\d+(?:\\.\\d+)?(?:[eE][+-]?\\d+)?)/g,': '+span('json-num','$1'));
+      }}
+
+      zoomOverlay.addEventListener('click',function(){{
+        zoomOverlay.classList.remove('open');
+      }});
+
+      document.querySelectorAll('.drawer-link').forEach(function(a){{
         a.addEventListener('click',function(e){{
           e.preventDefault();
-          open(this.getAttribute('href'),this.textContent.trim());
+          e.stopPropagation();
+          var href = a.getAttribute('data-href');
+          if (href) {{
+            open(href, a.textContent.trim());
+          }}
         }});
       }});
 
@@ -822,19 +916,36 @@ def _write_batch_html(result: BatchTestResult, report_dir: Path, output_path: Pa
     html_path.write_text(html_text, encoding="utf-8")
 
 
+def _build_embedded_files_script(result: BatchTestResult, report_dir: Path) -> str:
+    """Embed per-sample text file contents as a JS object so drawer works offline."""
+    embedded: dict[str, str] = {}
+    for sample in result.samples:
+        sample_dir = Path(sample.report_dir)
+        relative = _relative_sample_report_dir(result, sample)
+        for fname in ("result.json", "before.txt", "after.txt"):
+            fpath = sample_dir / fname
+            if fpath.exists():
+                try:
+                    content = fpath.read_text(encoding="utf-8-sig")
+                except (UnicodeDecodeError, OSError):
+                    continue
+                embedded[f"{relative}/{fname}"] = content
+    if not embedded:
+        return ""
+    raw = json.dumps(embedded, ensure_ascii=False)
+    raw = raw.replace("</", "<\\/")
+    return f"<script>window.__EMBEDDED__ = {raw};</script>"
+
+
 def _build_ring_svg(pct: int) -> str:
     r = 42
     circumference = round(2 * 3.14159265 * r, 2)
-    pass_offset = 0
-    fail_offset = round(circumference * (100 - pct) / 100, 2)
+    pass_dash = round(circumference * pct / 100, 2)
     return (
         f'<svg width="130" height="130" viewBox="0 0 100 100">'
         f'<circle cx="50" cy="50" r="{r}" fill="none" stroke="#e2e8f0" stroke-width="7"/>'
-        f'<circle cx="50" cy="50" r="{r}" fill="none" stroke="#e74c3c" stroke-width="7"'
-        f' stroke-dasharray="{circumference}" stroke-dashoffset="{fail_offset}" stroke-linecap="round"/>'
         f'<circle cx="50" cy="50" r="{r}" fill="none" stroke="#0d9488" stroke-width="7"'
-        f' stroke-dasharray="{circumference}" stroke-dashoffset="{circumference}" stroke-linecap="round"'
-        f' transform="rotate({360 * (100 - pct) / 100} 50 50)"/>'
+        f' stroke-dasharray="{pass_dash} {circumference}" stroke-dashoffset="0" stroke-linecap="round"/>'
         f'</svg>'
     )
 
@@ -939,7 +1050,7 @@ def _html_label(classification_value: str) -> str:
 
 
 def _html_link(href: str, label: str) -> str:
-    return f'<a href="{_html_escape(href)}">{_html_escape(label)}</a>'
+    return f'<a href="#" data-href="{_html_escape(href)}" class="drawer-link">{_html_escape(label)}</a>'
 
 
 def _html_image_compare_cell(image_compare_result: Any) -> str:
@@ -949,8 +1060,8 @@ def _html_image_compare_cell(image_compare_result: Any) -> str:
     if value is None:
         return "<td>—</td>"
     if value.classification.value == "AV_ANALYZE_BLOCKED":
-        return '<td><span class="tag tag-blocked">有弹窗</span></td>'
-    return '<td><span class="tag tag-clean">无明显变化</span></td>'
+        return '<td><span class="tag tag-blocked">存在差异</span></td>'
+    return '<td><span class="tag tag-clean">基本相同</span></td>'
 
 
 def _av_analyze_html_row(
@@ -968,9 +1079,9 @@ def _av_analyze_html_row(
         ar = sample.av_analyze_result
         log_blocked = ar.log_found
         if log_blocked:
-            log_cell = '<td><span class="tag tag-blocked">检测到威胁</span></td>'
+            log_cell = '<td><span class="tag tag-blocked">存在记录</span></td>'
         else:
-            log_cell = '<td><span class="tag tag-clean">未检测到</span></td>'
+            log_cell = '<td><span class="tag tag-clean">不存在记录</span></td>'
 
     # Image column
     img_cell = _html_image_compare_cell(sample.image_compare_result)
@@ -985,11 +1096,11 @@ def _av_analyze_html_row(
 
     # If they disagree, annotate the verdict with a tooltip
     verdict_title = ""
+    has_img = sample.image_compare_result is not None and sample.image_compare_result.value is not None
+    img_label = "存在差异" if img_blocked else ("基本相同" if has_img else "无数据")
+    log_label = "存在记录" if log_blocked else "不存在记录"
     if combined_blocked and log_blocked != img_blocked:
-        if log_blocked:
-            verdict_title = ' title="日志检测到威胁 | 图片无明显变化 → 综合判定: 已拦截 (OR)"'
-        else:
-            verdict_title = ' title="日志未检测到 | 图片有弹窗 → 综合判定: 已拦截 (OR)"'
+        verdict_title = f' title="日志{log_label} | 图片{img_label} → 综合判定: 已拦截 (OR)"'
 
     verdict_cell = f'<td><span class="badge {verdict_class}"{verdict_title}><span class="badge-dot"></span>{verdict_label}</span></td>'
 
@@ -1183,6 +1294,20 @@ def write_batch_html_from_json(batch_json_path: Path, output_html_path: Path | N
                 classification=Classification(ic_data["classification"]),
             )
             ic_deferred = DeferredImageResult(value=ic_value)
+        elif not ic_data:
+            # Backward compat: extract from image_compare step in old reports
+            for step in sample_json.get("steps", []):
+                if step.get("name") == "image_compare" and step.get("detail"):
+                    try:
+                        ic_cls = Classification(step["detail"])
+                        ic_deferred = DeferredImageResult(value=AvAnalyzeResult(
+                            log_found=False,
+                            screenshot_analysis=step["detail"],
+                            classification=ic_cls,
+                        ))
+                    except ValueError:
+                        pass
+                    break
 
         sp = SampleTestResult(
             test_case=TestCase(

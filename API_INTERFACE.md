@@ -30,13 +30,15 @@ vm-auto-test [--env-file .env] [command] [options]
 | `run-csv` | 从 CSV 批量测试 |
 | `run-config` | 从 YAML 配置运行 |
 | `init-config` | 交互式创建 YAML 配置 |
+| `report` | 从已有 JSON 重新生成 HTML/JSON 报告 |
+| `doctor` | 检查本地环境配置 |
 
 ### 1.2 `run` 命令参数
 
 ```
 vm-auto-test run
   --vm <vmx路径>              (必填) VM ID 或 .vmx 路径
-  --mode <baseline|av>        (必填) 测试模式
+  --mode <baseline|av|av-analyze> (必填) 测试模式
   --snapshot <快照名>         快照名称
   --sample-command <命令>     (必填) 执行样本的 guest 命令
   --sample-shell <cmd|powershell>   (默认: cmd)
@@ -67,14 +69,17 @@ vm-auto-test run
 
 ```python
 class TestMode(str, Enum):
-    BASELINE = "baseline"   # 干净快照，验证样本是否有效
-    AV = "av"               # 带杀软快照，验证杀软能否拦截
+    BASELINE = "baseline"       # 干净快照，验证样本是否有效
+    AV = "av"                   # 带杀软快照，验证杀软能否拦截
+    AV_ANALYZE = "av_analyze"   # 截图+日志+AI分析判定杀软拦截
 
 class Classification(str, Enum):
-    BASELINE_VALID              = "BASELINE_VALID"            # 样本有效
-    BASELINE_INVALID            = "BASELINE_INVALID"           # 样本无效
-    AV_NOT_BLOCKED              = "AV_NOT_BLOCKED"             # 杀软未拦截
-    AV_BLOCKED_OR_NO_CHANGE     = "AV_BLOCKED_OR_NO_CHANGE"   # 杀软已拦截
+    BASELINE_VALID              = "BASELINE_VALID"              # 样本有效
+    BASELINE_INVALID            = "BASELINE_INVALID"             # 样本无效
+    AV_NOT_BLOCKED              = "AV_NOT_BLOCKED"               # 杀软未拦截
+    AV_BLOCKED_OR_NO_CHANGE     = "AV_BLOCKED_OR_NO_CHANGE"     # 杀软已拦截
+    AV_ANALYZE_BLOCKED          = "AV_ANALYZE_BLOCKED"          # 日志/截图有变化，已拦截
+    AV_ANALYZE_NOT_BLOCKED      = "AV_ANALYZE_NOT_BLOCKED"      # 日志/截图无变化，未拦截
 
 class Shell(str, Enum):
     CMD = "cmd"
@@ -158,6 +163,28 @@ class CollectedLog:
     capture_method: str = "direct"
 
 @dataclass(frozen=True)
+class AvAnalyzeSpec:                         # AV 分析模式配置
+    log_collect_shell: Shell = Shell.POWERSHELL
+    log_sources: tuple[AvLogSourceSpec, ...] = ()
+    log_collect_command: str = ""
+    log_export_preset: str = ""
+    api_key_env: str = ""
+    analyzer_command: str = ""
+    enable_image_compare: bool = False       # 启用像素级截图对比
+    image_compare_threshold: float = 5.0     # 差异像素百分比阈值
+
+@dataclass(frozen=True)
+class AvAnalyzeResult:                       # AV 分析结果
+    log_found: bool = False                  # 日志是否有变化
+    log_detail: str = ""                     # 日志分析详情
+    screenshot_analysis: str | None = None   # AI 截图分析文本
+    classification: Classification = Classification.AV_ANALYZE_NOT_BLOCKED
+
+@dataclass
+class DeferredImageResult:                   # 后台截图对比结果容器 (mutable)
+    value: AvAnalyzeResult | None = None
+
+@dataclass(frozen=True)
 class TestCase:                              # 测试输入
     vm_id: str
     snapshot: str | None
@@ -176,6 +203,8 @@ class TestCase:                              # 测试输入
     verification: VerificationSpec | None = None
     av_log_collectors: tuple[AvLogCollectorSpec, ...] = ()
     capture_screenshot: bool = False
+    av_analyze: AvAnalyzeSpec | None = None      # av_analyze 模式配置
+    normalize_ignore_patterns: tuple[str, ...] = ()
     # 方法: effective_samples() -> tuple[SampleSpec, ...]
     # 方法: effective_verification() -> VerificationSpec
 
@@ -198,6 +227,8 @@ class TestResult:                            # 单样本测试输出
     steps: tuple[StepResult, ...] = ()
     evaluation: EvaluationResult | None = None
     logs: tuple[CollectedLog, ...] = ()
+    av_analyze_result: AvAnalyzeResult | None = None
+    image_compare_result: DeferredImageResult | None = None
 
 @dataclass(frozen=True)
 class SampleTestResult:                     # 批量中的单样本结果
@@ -211,6 +242,9 @@ class SampleTestResult:                     # 批量中的单样本结果
     classification: Classification
     steps: tuple[StepResult, ...] = ()
     logs: tuple[CollectedLog, ...] = ()
+    duration_seconds: float = 0.0
+    av_analyze_result: AvAnalyzeResult | None = None
+    image_compare_result: DeferredImageResult | None = None
     # 属性: changed -> bool (evaluation.changed 别名)
 
 @dataclass(frozen=True)
@@ -220,6 +254,7 @@ class BatchTestResult:                      # 批量测试总结果
     samples: tuple[SampleTestResult, ...]
     classification: Classification
     steps: tuple[StepResult, ...] = ()
+    duration_seconds: float = 0.0
 ```
 
 ---
@@ -247,7 +282,7 @@ class TestOrchestrator:
     async def run_batch(self, test_case: TestCase) -> BatchTestResult
 ```
 
-**测试流程** (单样本):
+**测试流程** (baseline/av):
 
 ```
 create_report_dir → revert_snapshot → start_vm → wait_guest_ready
@@ -255,7 +290,17 @@ create_report_dir → revert_snapshot → start_vm → wait_guest_ready
 → [capture_screenshot] → [collect_av_logs] → evaluate → write_report
 ```
 
-`run_batch` 对每个 sample 重复执行 `run_single_sample`，最后汇总。
+**测试流程** (av_analyze):
+
+```
+create_report_dir → revert_snapshot → start_vm → wait_guest_ready
+→ detect_av → screenshot(before) → collect_logs(before) → run_sample
+→ screenshot(after) → collect_logs(after)
+→ 双轨判定: log_analysis (主) + image_compare (后台并行) → combined_verdict
+→ write_report
+```
+
+`run_batch` 对每个 sample 重复执行 `run_single_sample`，最后等待所有后台图片对比任务完成后回填分类。
 
 ---
 
@@ -338,7 +383,7 @@ def create_provider(provider_type: str = "vmrun") -> VmwareProvider
 ```yaml
 vm_id: "E:\\VM\\win11\\Windows 11 x64.vmx"
 snapshot: "Clean"
-mode: baseline                    # baseline | av
+mode: baseline                    # baseline | av | av_analyze
 guest:
   user: Administrator
   password_env: VMWARE_GUEST_PASSWORD  # 环境变量名 (默认)
@@ -377,6 +422,16 @@ av_logs:                          # 可选：采集杀软日志
       type: guest_command
       command: "Get-MpThreatDetection | ConvertTo-Json"
       shell: powershell
+av_analyze:                        # 仅 av_analyze 模式
+  log_collect_shell: powershell
+  log_sources:                      # 可选，留空自动检测
+    - guest_path: "C:\\Users\\{username}\\AppData\\..."
+      description: "360 主数据库"
+  log_collect_command: ""           # 可选，日志收集前置脚本
+  log_export_preset: ""            # 可选，360|huorong|tencent
+  api_key_env: ANTHROPIC_API_KEY   # 可选，启用 AI 分析
+  enable_image_compare: true       # 可选，像素级截图对比（无 AI 时）
+  image_compare_threshold: 5.0     # 可选，阈值百分比
 provider:
   type: vmrun
 baseline_result: null
@@ -402,7 +457,8 @@ C:\Samples\b.exe,dir C:\Users,powershell
 ```
 
 - 首行列名可选（以 `sample` 开头则跳过）
-- 3 列必填，路径非绝对时需 `--samples-base-dir`
+- baseline/av 模式: 3 列必填，路径非绝对时需 `--samples-base-dir`
+- av_analyze 模式: 仅需 1 列 `sample_file`（无需验证命令）
 - 编码: UTF-8 BOM → UTF-8 → GBK
 
 ---
@@ -428,14 +484,44 @@ def classify_result(effect_observed: bool, mode: TestMode) -> Classification
 
 **判定逻辑**:
 
-| 模式 | effect_observed=True | effect_observed=False |
-|---|---|---|
+| 模式 | effect_observed=True / 已拦截 | effect_observed=False / 未拦截 |
+|---|---|---|---|
 | BASELINE | `BASELINE_VALID` | `BASELINE_INVALID` |
 | AV | `AV_NOT_BLOCKED` | `AV_BLOCKED_OR_NO_CHANGE` |
+| AV_ANALYZE | `AV_ANALYZE_BLOCKED` (日志或截图有变化) | `AV_ANALYZE_NOT_BLOCKED` |
 
 ---
 
-## 七、报告系统
+## 七、AI 分析与截图对比 (Analysis)
+
+文件: `src/vm_auto_test/analysis.py`
+
+```python
+def compare_screenshots(
+    before_path: Path, after_path: Path, threshold: float = 5.0,
+) -> tuple[bool, float, str]
+    # 使用 Pillow 逐像素对比两张截图
+    # 返回 (差异显著, 差异百分比, 详情描述)
+    # 自动处理 VMware 渲染导致的微小尺寸差异（裁剪重叠区域）
+
+async def run_analysis(
+    config: AvAnalyzeSpec, log_content: str,
+    before_screenshot: Path, after_screenshot: Path,
+) -> AvAnalyzeResult
+    # 根据配置选择分析方式：
+    #   - AI 分析 (Anthropic API): 同时分析日志文本和截图差异
+    #   - 本地分析: 日志关键字匹配 + 像素截图对比
+    # AI 分析结果优先于本地分析
+
+def has_analyzer_cli(config: AvAnalyzeSpec) -> bool
+    # 检查是否配置了 AI 分析（api_key_env 或 analyzer_command）
+```
+
+**内置日志分析** (`_analyze_logs_builtin`): 在导出后的文本日志中搜索威胁相关关键词，包括：`Trojan`, `Backdoor`, `Malware`, `Worm`, `Virus`, `Ransom`, `木马`, `病毒`, `拦截`, `查杀`, `隔离`, 以及厂商特定关键词（360: `云查杀`、`QVM`；火绒: `HipsMain`、`文件实时监控`；腾讯: `Win32.Trojan`、`TfAvCenter`）。
+
+---
+
+## 八、报告系统
 
 文件: `src/vm_auto_test/reporting.py`
 
@@ -455,16 +541,24 @@ def batch_classification(
 ) -> Classification
     # baseline: 全部 VALID → VALID, 否则 INVALID
     # av: 任一 NOT_BLOCKED → NOT_BLOCKED, 否则 BLOCKED_OR_NO_CHANGE
+    # av_analyze: 任一 NOT_BLOCKED → NOT_BLOCKED, 否则 BLOCKED
 
 def load_baseline_is_valid(path: str) -> bool
     # 解析已有报告，判断 baseline 是否有效
+
+def write_batch_html_from_json(
+    batch_json_path: Path, output_html_path: Path | None = None,
+) -> None
+    # 从批量 JSON 重建 BatchTestResult 并生成交互式 HTML
+    # 自动读取 per-sample result.json + before.txt + after.txt
 ```
 
 ### 7.1 报告文件结构
 
+**单样本 (baseline/av)**:
 ```
 reports/20260512-143022-567890-sample/
-├── result.json          # TestResult JSON (schema v1) 或 SampleTestResult (v2)
+├── result.json          # TestResult JSON (schema v1)
 ├── before.txt           # before 验证输出
 ├── after.txt            # after 验证输出
 ├── sample_stdout.txt    # 样本执行 stdout
@@ -473,20 +567,36 @@ reports/20260512-143022-567890-sample/
 ├── test.log             # 测试步骤日志
 └── av_logs/             # (optional) 杀软日志
     └── <collector_id>_stdout.txt
+```
 
-批量模式额外:
+**单样本 (av_analyze)**:
+```
+reports/20260512-143022-567890-sample/
+├── result.json          # schema v1
+├── before.txt           # 日志收集(before) 导出文本
+├── after.txt            # 日志收集(after) 导出文本
+├── screenshot_before.png
+├── screenshot_after.png
+├── test.log
+└── av_logs/
+    ├── before/          # 原始 SQLite 日志 before
+    └── after/           # 原始 SQLite 日志 after + 导出文本
+```
+
+**批量模式**:
+```
 reports/...batch/
 ├── result.json          # BatchTestResult (schema v2)
-├── result.csv           # 批量 CSV
-├── result.html          # 可视化 HTML 报告
+├── result.csv           # UTF-8 BOM CSV
+├── result.html          # 交互式 HTML 报告
 ├── test.log
-└── samples/<sample_id>/ # 每个样本独立子目录
+└── samples/<sample_id>/
     ├── result.json
-    ├── before.txt
-    ├── after.txt
-    ├── sample_stdout.txt
-    ├── sample_stderr.txt
-    └── screenshot.png
+    ├── before.txt / after.txt
+    ├── sample_stdout.txt / sample_stderr.txt  # baseline/av
+    ├── screenshot.png                          # baseline/av
+    ├── screenshot_before.png / screenshot_after.png  # av_analyze
+    └── av_logs/                                # av_analyze
 ```
 
 ### 7.2 `result.json` 结构 (schema v2, 批量)
@@ -504,7 +614,8 @@ reports/...batch/
       "AV_BLOCKED_OR_NO_CHANGE": 2,
       "AV_NOT_BLOCKED": 1
     },
-    "overall_classification": "AV_NOT_BLOCKED"
+    "overall_classification": "AV_NOT_BLOCKED",
+    "duration_seconds": 142.5
   },
   "samples": [
     {
@@ -512,8 +623,22 @@ reports/...batch/
       "classification": "AV_BLOCKED_OR_NO_CHANGE",
       "changed": false,
       "effect_observed": false,
+      "sample_command": "C:\\Samples\\a.exe",
       "report_dir": "samples/sample1",
-      "steps": [...]
+      "steps": [...],
+      "duration_seconds": 35.2,
+      "av_analyze_result": {
+        "log_found": false,
+        "log_detail": "日志无变化",
+        "screenshot_analysis": null,
+        "classification": "AV_ANALYZE_NOT_BLOCKED"
+      },
+      "image_compare_result": {
+        "log_found": true,
+        "log_detail": "检测到 12.3% 像素差异",
+        "screenshot_analysis": "检测到弹窗",
+        "classification": "AV_ANALYZE_BLOCKED"
+      }
     }
   ],
   "steps": [...]
@@ -522,7 +647,7 @@ reports/...batch/
 
 ---
 
-## 八、环境变量与凭据
+## 九、环境变量与凭据
 
 文件: `src/vm_auto_test/env.py`
 
@@ -535,7 +660,7 @@ reports/...batch/
 | `VMWARE_GUEST_PASSWORD` | Guest 密码 (YAML 配置中 `password_env` 的默认值) |
 | `VM_AUTO_TEST_SMOKE_VM_ID` | 冒烟测试 VM ID |
 
-### 8.1 `credentials.json` 结构
+### 9.1 `credentials.json` 结构
 
 ```json
 {
@@ -546,7 +671,7 @@ reports/...batch/
 }
 ```
 
-### 8.2 关键函数
+### 9.2 关键函数
 
 ```python
 def load_env_file(path: Path, *, override: bool = False) -> None
@@ -560,7 +685,7 @@ def remove_vm_credentials(vm_id: str) -> bool
 
 ---
 
-## 九、AV 检测
+## 十、AV 检测
 
 文件: `src/vm_auto_test/av_detection.py`
 
@@ -582,7 +707,7 @@ def parse_detection_result(stdout: str) -> str | None
 
 ---
 
-## 十、AV 日志采集
+## 十一、AV 日志采集
 
 文件: `src/vm_auto_test/av_logs.py`
 
@@ -596,7 +721,7 @@ async def collect_av_logs(
 
 ---
 
-## 十一、冒烟测试 (`vm-auto-test-smoke`)
+## 十二、冒烟测试 (`vm-auto-test-smoke`)
 
 文件: `src/vm_auto_test/smoke.py:18`
 
@@ -613,7 +738,7 @@ vm-auto-test-smoke
 
 ---
 
-## 十二、MCP Server 接口
+## 十三、MCP Server 接口
 
 入口文件: `src/vmware_mcp/server.py:517`
 CLI 命令: `vmware-mcp` (stdio 协议)
@@ -707,7 +832,7 @@ class VMwareClient:
 
 ---
 
-## 十三、Progress 回调协议
+## 十四、Progress 回调协议
 
 ```python
 ProgressCallback = Callable[[StepResult], None]
@@ -721,7 +846,7 @@ ProgressCallback = Callable[[StepResult], None]
 
 ---
 
-## 十四、扩展指南
+## 十五、扩展指南
 
 ### 新增 Provider
 
@@ -739,7 +864,7 @@ ProgressCallback = Callable[[StepResult], None]
 
 ---
 
-## 十五、依赖
+## 十六、依赖
 
 ```toml
 # pyproject.toml
@@ -750,6 +875,7 @@ dependencies = [
     "mcp>=1.0.0",
     "httpx>=0.27.0",
     "PyYAML>=6.0",
+    "Pillow>=10.0",
 ]
 
 [project.scripts]

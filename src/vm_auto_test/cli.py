@@ -818,9 +818,8 @@ async def _build_interactive_av_analyze_test_case(
             print(f"  模式:       av_analyze (日志分析杀软拦截)")
             print(f"  样本:       {sample_command}")
             print("  分析方式:   自动识别杀软 + 日志关键字匹配")
-            enable_img = input("  启用本地截图对比（像素级对比检测弹窗，无需API）? [y/N]: ").strip().lower() == "y"
-            if enable_img:
-                print("  截图对比:   已启用")
+            print("  截图对比:   已启用（默认）")
+            enable_img = True
             confirm = input(f"  确认{confirm_action}? [y/N]: ").strip().lower()
             if confirm == "b":
                 step = 3
@@ -970,7 +969,7 @@ async def _build_interactive_single_test_case(
         if step == 6:
             if mode == TestMode.AV_ANALYZE:
                 capture_screenshot = True
-                enable_img = input("  启用本地截图对比（像素级对比检测弹窗，无需API）? [y/N]: ").strip().lower() == "y"
+                enable_img = True
             else:
                 capture_screenshot = input("  截取 VM 截图? [y/N]: ").strip().lower() == "y"
                 enable_img = False
@@ -983,7 +982,7 @@ async def _build_interactive_single_test_case(
             if capture_screenshot:
                 print("  截图:     是")
             if enable_img:
-                print("  截图对比:   已启用")
+                print("  截图对比:   已启用（默认）")
             confirm = input(f"  确认{confirm_action}? [y/N]: ").strip().lower()
             if confirm == "b":
                 step = 3 if mode == TestMode.AV_ANALYZE else 5
@@ -1167,14 +1166,14 @@ async def _build_interactive_csv_test_case(
             print(f"  模式:     {mode.value}")
             if mode == TestMode.AV_ANALYZE:
                 capture_screenshot = True
-                enable_img = input("  启用本地截图对比（像素级对比检测弹窗，无需API）? [y/N]: ").strip().lower() == "y"
+                enable_img = True
             else:
                 capture_screenshot = input("  截取 VM 截图? [y/N]: ").strip().lower() == "y"
                 enable_img = False
             if capture_screenshot:
                 print("  截图:     是")
             if enable_img:
-                print("  截图对比:   已启用")
+                print("  截图对比:   已启用（默认）")
             confirm = input(f"  确认{confirm_action}? [y/N]: ").strip().lower()
             if confirm == "b":
                 step = 4

@@ -4,6 +4,7 @@ import asyncio
 import logging
 import re
 import time
+from dataclasses import replace
 from collections.abc import Awaitable, Callable
 from datetime import datetime
 from pathlib import Path
@@ -405,6 +406,27 @@ class TestOrchestrator:
         if self._pending_image_tasks:
             await asyncio.gather(*self._pending_image_tasks)
             self._pending_image_tasks.clear()
+
+        # Reconcile image compare results: image blocked → overall blocked
+        reconciled: list[SampleTestResult] = []
+        for sr in sample_results:
+            ic = sr.image_compare_result
+            if (
+                sr.classification == Classification.AV_ANALYZE_NOT_BLOCKED
+                and ic is not None
+                and ic.value is not None
+                and ic.value.classification == Classification.AV_ANALYZE_BLOCKED
+            ):
+                reconciled.append(
+                    replace(
+                        sr,
+                        classification=Classification.AV_ANALYZE_BLOCKED,
+                        evaluation=EvaluationResult(changed=False, effect_observed=False),
+                    )
+                )
+            else:
+                reconciled.append(sr)
+        sample_results = reconciled
 
         classification = self._run_sync_progress_step(
             "batch_evaluate",
@@ -1064,8 +1086,8 @@ class TestOrchestrator:
             sample=sample_result,
             after=CommandResult(command="log_collect", stdout=after_log_content),
             evaluation=EvaluationResult(
-                changed=combined_blocked,
-                effect_observed=combined_blocked,
+                changed=not combined_blocked,
+                effect_observed=not combined_blocked,
             ),
             classification=Classification.AV_ANALYZE_BLOCKED if combined_blocked else Classification.AV_ANALYZE_NOT_BLOCKED,
             steps=tuple(steps),

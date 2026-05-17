@@ -189,6 +189,8 @@ def compare_screenshots(
     """Compare two screenshots pixel-by-pixel using Pillow.
 
     Returns (differ_significantly, diff_percent, detail).
+    Minor size mismatches (VMware rendering artifacts) are handled by
+    cropping to the overlapping region before comparing.
     Requires Pillow.
     """
     from PIL import Image, ImageChops
@@ -201,15 +203,22 @@ def compare_screenshots(
     img_before = Image.open(before_path).convert("RGB")
     img_after = Image.open(after_path).convert("RGB")
 
+    size_note = ""
     if img_before.size != img_after.size:
-        return True, 100.0, (
-            f"截图尺寸不一致: before={img_before.size}, after={img_after.size}"
-        )
+        bw, bh = img_before.size
+        aw, ah = img_after.size
+        dw = abs(bw - aw)
+        dh = abs(bh - ah)
+        # Crop to overlapping region — minor size differences are
+        # common VMware rendering artifacts, not AV popups.
+        crop_w = min(bw, aw)
+        crop_h = min(bh, ah)
+        img_before = img_before.crop((0, 0, crop_w, crop_h))
+        img_after = img_after.crop((0, 0, crop_w, crop_h))
+        size_note = f" (截图尺寸有微小差异: {dw}×{dh}px)"
 
     diff_img = ImageChops.difference(img_before, img_after)
     diff_gray = diff_img.convert("L")
-    # A pixel differs if its luminance difference exceeds 30 (tolerant of
-    # compression noise / minor rendering differences)
     diff_pixels = sum(1 for p in diff_gray.getdata() if p > 30)
     total_pixels = diff_img.size[0] * diff_img.size[1]
     diff_percent = round(diff_pixels / total_pixels * 100, 2)
@@ -217,10 +226,10 @@ def compare_screenshots(
     if diff_percent >= threshold:
         return True, diff_percent, (
             f"截图差异显著：{diff_percent}% 像素不同（阈值 {threshold}%），"
-            f"可能出现了弹窗或界面变化"
+            f"可能出现了弹窗或界面变化{size_note}"
         )
     return False, diff_percent, (
-        f"截图差异较小：{diff_percent}% 像素不同，无明显弹窗"
+        f"截图差异较小：{diff_percent}% 像素不同，无明显弹窗{size_note}"
     )
 
 
