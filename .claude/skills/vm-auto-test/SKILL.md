@@ -40,7 +40,7 @@ Console scripts: `vm-auto-test`, `vm-auto-test-smoke`, `vmware-mcp`.
 
 - `run --config` is the recommended config entrypoint. Do NOT mix with direct flags (`--vm`, `--mode`, `--sample-command`, `--reports-dir`); CLI rejects mixed usage.
 - Before non-interactive real runs, prefer `vm-auto-test doctor --config <yaml>` first.
-- Interactive menu: `[0] 退出` `[1] 测试单样本` `[2] 测试多样本 (CSV)` `[3] 列出 VM` `[4] 列出快照` `[5] 计划任务` `[6] AV分析测试` `[7] 重新配置环境`
+- Interactive menu: `[0] 退出` `[1] 测试单样本` `[2] 测试多样本 (CSV)` `[3] 列出 VM` `[4] 列出快照` `[5] 计划任务` `[6] 重新配置环境`
 - Plan tasks are an interactive in-memory queue: add single or CSV batch tests, set repeat counts (default 1, max 100), view/delete/clear tasks, then execute sequentially in the current session.
 - Plan tasks are not persisted and are not a background scheduler/cron. Exiting the interactive session discards the queue.
 - Plan-task execution reuses existing single/batch orchestration and reports; it must not print guest passwords.
@@ -63,16 +63,16 @@ Confirm/ask for: (1) `vmrun.exe` installed and `VMRUN_PATH` configured; (2) `.vm
 | `BASELINE_INVALID` | No effect in baseline | Fix sample path, permissions, or verification |
 | `AV_NOT_BLOCKED` | Effect still occurred under AV | Keep for defensive analysis; do not pivot to evasion |
 | `AV_BLOCKED_OR_NO_CHANGE` | No effect under AV | Distinguish blocking vs sample failure via reports/logs |
-| `AV_ANALYZE_BLOCKED` | Log changed, AV recorded new activity | AV intercepted the sample |
-| `AV_ANALYZE_NOT_BLOCKED` | Log unchanged, AV detected no threat | AV did not intercept the sample |
+| `AV_ANALYZE_BLOCKED` | Log/screenshot changed, AV recorded new activity | AV intercepted the sample |
+| `AV_ANALYZE_NOT_BLOCKED` | Log/screenshot unchanged, AV detected no threat | AV did not intercept the sample |
 
 ## Report structures
 
-Single run: `reports/<timestamp>-<sample>/` → `result.json` (schema 1), `before.txt`, `after.txt`, `sample_stdout.txt`, `sample_stderr.txt`, `test.log`, optional `screenshot.png`, optional `av_logs/`.
+Single run: `reports/<timestamp>-<sample>/` → `result.json` (schema 1), `before.txt`, `after.txt`, `sample_stdout.txt`, `sample_stderr.txt`, `test.log`, optional `screenshot.png` (baseline/av) or `screenshot_before.png` + `screenshot_after.png` (av_analyze), optional `av_logs/`.
 
-Batch run: `reports/<timestamp>-batch/` → `result.json` (schema 2), `result.csv` (UTF-8 BOM), `result.html` (interactive dashboard), `test.log`, `samples/<id>/` per-sample artifacts.
+Batch run: `reports/<timestamp>-batch/` → `result.json` (schema 2), `result.csv` (UTF-8 BOM, formula-safe), `result.html` (interactive dashboard), `test.log`, `samples/<id>/` per-sample artifacts. av_analyze mode: HTML has log analysis + image diff columns (no verify command), 5 artifact files only.
 
-`vm-auto-test report` reads existing JSON and emits standalone HTML or formatted JSON (default `--format html`).
+`vm-auto-test report` reads existing JSON, auto-detects schema version: batch JSON (schema 2 with `samples` and `mode`) generates interactive HTML; single-sample JSON generates standalone HTML. Default `--format html`.
 
 ## Comparison strategies (YAML `verification.comparisons`)
 
@@ -92,7 +92,7 @@ Multi-sample: use `samples:` array (not `sample:`). Top-level `verification` req
 
 AV optional: `baseline_result: "reports/<path>/result.json"`.
 
-AV_ANALYZE mode: `mode: av_analyze`, `av_analyze.log_sources` (optional, auto-populated from AV detection), `av_analyze.log_collect_command` (optional), `av_analyze.log_export_preset` (optional), `av_analyze.api_key_env` (optional for AI screenshot analysis). Verification is optional in this mode.
+AV_ANALYZE mode: `mode: av_analyze`, `av_analyze.log_sources` (optional, auto-populated from AV detection), `av_analyze.log_collect_command` (optional), `av_analyze.log_export_preset` (optional), `av_analyze.api_key_env` (optional for AI analysis), `av_analyze.enable_image_compare` (optional, pixel-level screenshot diff), `av_analyze.image_compare_threshold` (optional, default 5.0%). Verification is optional in this mode. CSV only needs 1 column (`sample_file`).
 
 ## AV detection & logs
 
@@ -122,7 +122,7 @@ When `--capture-screenshot` is enabled:
 | `VmToolsNotReadyError` | VMware Tools missing | Install/restart VMware Tools |
 | Guest auth failures | Wrong creds, online account, no profile | Local admin, log in once, reconfigure |
 | `BASELINE_INVALID` | Bad path/permissions/verification | Fix verification command for cred user context |
-| CSV parse error | Encoding/columns/path | UTF-8/GBK, `sample_file,verify_command,verify_shell` |
+| CSV parse error | Encoding/columns/path | UTF-8/GBK, `sample_file,verify_command,verify_shell` (av_analyze mode: `sample_file` only) |
 | `%APPDATA%` in PS | cmd syntax | Use `$env:APPDATA` or `cmd` shell |
 | `run-dir` guest fail | Host path != guest path | Use shared paths or CSV |
 | Screenshot missing | Not requested or failed | `--capture-screenshot`, check `result.json` steps |
@@ -132,6 +132,7 @@ When `--capture-screenshot` is enabled:
 | AV_ANALYZE no logs | AV not detected, wrong username, log files not found | Verify AV processes running, check `{username}` in paths |
 | AV_ANALYZE export empty | WAL recovery or SQLite parse issue | Check raw log files in `av_logs/after/` |
 | AV_ANALYZE false positive | Volatile headers in exported text | Already handled by `_normalize_log_for_comparison` |
+| AV_ANALYZE image compare pending | Screenshot files missing or comparison not completed | Check `screenshot_before.png` and `screenshot_after.png` exist, verify Pillow installed |
 
 ## Development checks
 
@@ -155,11 +156,11 @@ When modifying only this skill document, verify against source files instead of 
 |------|------|
 | CLI args, interactive flow, `config validate`, `report`, `run --config` | `src/vm_auto_test/cli.py` |
 | YAML/CSV schema, sample scanning | `src/vm_auto_test/config.py` |
-| Execution orchestration (incl. screenshot timing) | `src/vm_auto_test/orchestrator.py` |
+| Execution orchestration (incl. screenshot timing, av_analyze dual-track) | `src/vm_auto_test/orchestrator.py` |
 | AV process detection + log profiles | `src/vm_auto_test/av_detection.py` |
 | AV log collection from guest | `src/vm_auto_test/av_logs.py` |
 | AV log export (SQLite → text) | `src/vm_auto_test/av_exporters/` |
-| AI log + screenshot analysis | `src/vm_auto_test/analysis.py` |
+| AI log + screenshot analysis, pixel-level image comparison | `src/vm_auto_test/analysis.py` |
 | Output comparison and classification | `src/vm_auto_test/evaluator.py` |
 | Report artifacts and schemas | `src/vm_auto_test/reporting.py` |
 | Console scripts | `pyproject.toml` |

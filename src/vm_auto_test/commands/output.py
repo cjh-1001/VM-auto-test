@@ -13,8 +13,12 @@ _STEP_LABELS: dict[str, str] = {
     "run_sample": "执行恶意样本",
     "after_verification": "攻击后效果验证",
     "capture_screenshot": "截取 VM 画面",
+    "capture_screenshot_before": "截图(before)",
+    "capture_screenshot_after": "截图(after)",
     "collect_av_logs": "采集杀软日志",
-    "evaluate": "判定攻击效果",
+    "log_analysis": "日志判断",
+    "image_compare": "截图对比",
+    "evaluate": "综合判定攻击效果",
     "write_report": "生成测试报告",
     "write_batch_report": "生成批量报告",
     "batch_sample": "处理样本",
@@ -53,8 +57,8 @@ def classify_cn(classification: Classification | str, short: bool = False) -> st
         "BASELINE_INVALID": "✗ FAILED — 无效" if short else "样本无效（前后输出无变化）",
         "AV_NOT_BLOCKED": "✗ FAILED — 未拦截" if short else "杀软未拦截（攻击效果发生）",
         "AV_BLOCKED_OR_NO_CHANGE": "✓ SUCCESS — 已拦截" if short else "杀软已拦截或未生效",
-        "AV_ANALYZE_BLOCKED": "✓ SUCCESS — AI分析: 已拦截",
-        "AV_ANALYZE_NOT_BLOCKED": "✗ FAILED — AI分析: 未拦截",
+        "AV_ANALYZE_BLOCKED": "✓ 已拦截",
+        "AV_ANALYZE_NOT_BLOCKED": "✗ 未拦截",
     }
     value = classification.value if hasattr(classification, "value") else str(classification)
     return mapping.get(value, value)

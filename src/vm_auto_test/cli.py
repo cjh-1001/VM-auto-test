@@ -55,6 +55,7 @@ from vm_auto_test.models import (
     VerificationSpec,
 )
 from vm_auto_test.orchestrator import TestOrchestrator
+from vm_auto_test.reporting import write_batch_html_from_json
 from vm_auto_test.providers.base import VmToolsNotReadyError, VmwareProvider
 from vm_auto_test.providers.factory import create_provider
 
@@ -393,6 +394,9 @@ def _generate_report_from_json(input_path: Path, output_path: Path, output_forma
     output_path.parent.mkdir(parents=True, exist_ok=True)
     if output_format == "json":
         output_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        return
+    if data.get("schema_version") == 2 and "samples" in data and "mode" in data:
+        write_batch_html_from_json(input_path, output_path)
         return
     output_path.write_text(_standalone_html_report(data), encoding="utf-8")
 
@@ -1163,10 +1167,14 @@ async def _build_interactive_csv_test_case(
             print(f"  模式:     {mode.value}")
             if mode == TestMode.AV_ANALYZE:
                 capture_screenshot = True
+                enable_img = input("  启用本地截图对比（像素级对比检测弹窗，无需API）? [y/N]: ").strip().lower() == "y"
             else:
                 capture_screenshot = input("  截取 VM 截图? [y/N]: ").strip().lower() == "y"
+                enable_img = False
             if capture_screenshot:
                 print("  截图:     是")
+            if enable_img:
+                print("  截图对比:   已启用")
             confirm = input(f"  确认{confirm_action}? [y/N]: ").strip().lower()
             if confirm == "b":
                 step = 4
@@ -1186,7 +1194,10 @@ async def _build_interactive_csv_test_case(
             )
 
             if mode == TestMode.AV_ANALYZE:
-                av_spec = AvAnalyzeSpec(log_collect_shell=Shell.POWERSHELL)
+                av_spec = AvAnalyzeSpec(
+                    log_collect_shell=Shell.POWERSHELL,
+                    enable_image_compare=enable_img,
+                )
                 return TestCase(
                     vm_id=vm_id,
                     snapshot=snapshot,

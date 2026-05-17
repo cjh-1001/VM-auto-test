@@ -148,6 +148,12 @@ class AvAnalyzeResult:
     classification: Classification = Classification.AV_ANALYZE_NOT_BLOCKED
 
 
+@dataclass
+class DeferredImageResult:
+    """Mutable holder for a background image comparison result."""
+    value: AvAnalyzeResult | None = None
+
+
 @dataclass(frozen=True)
 class TestCase:
     vm_id: str
@@ -208,6 +214,7 @@ class TestResult:
     evaluation: EvaluationResult | None = None
     logs: tuple[CollectedLog, ...] = field(default_factory=tuple)
     av_analyze_result: AvAnalyzeResult | None = None
+    image_compare_result: DeferredImageResult | None = None
 
 
 @dataclass(frozen=True)
@@ -224,6 +231,7 @@ class SampleTestResult:
     logs: tuple[CollectedLog, ...] = field(default_factory=tuple)
     duration_seconds: float = 0.0
     av_analyze_result: AvAnalyzeResult | None = None
+    image_compare_result: DeferredImageResult | None = None
 
     @property
     def changed(self) -> bool:

@@ -161,11 +161,14 @@ av_analyze:
     - guest_path: "C:\\Users\\{username}\\AppData\\Roaming\\360Quarant\\360safe.Summary.dat"
       description: "360 主数据库"
   log_collect_command: ""               # 可选，日志收集前置脚本
+  api_key_env: ANTHROPIC_API_KEY        # 可选，启用 AI 日志+截图分析
+  enable_image_compare: true            # 可选，启用像素级截图对比（无 AI 时生效）
+  image_compare_threshold: 5.0          # 可选，差异像素百分比阈值，默认 5.0%
 ```
 
-测试链路：回滚快照 → 启动 VM → 截图(before) → 收集日志(before) → 执行样本 → 延迟截图(after) → 收集日志(after) → 日志对比（导出后归一化比对） → 判定。
+测试链路：回滚快照 → 启动 VM → 截图(before) → 收集日志(before) → 执行样本 → 延迟截图(after) → 收集日志(after) → 双轨判定：日志对比（导出后归一化比对）+ 截图对比（像素级，后台并行） → 综合判定。
 
-当配置了 `api_key_env` 时，还会调用 AI 对截图和日志进行深度分析。
+当配置了 `api_key_env` 时，优先调用 AI 对截图和日志进行深度分析，AI 结果会覆盖本地日志/截图对比结论。无 AI 时可通过 `enable_image_compare: true` 开启像素级截图前后对比（后台并行，不影响耗时），`image_compare_threshold` 设置差异像素百分比阈值（默认 5.0%）。
 
 日志源支持 `{username}` 占位符，运行时自动从 Guest 查询真实用户名替换。
 
@@ -204,6 +207,8 @@ vm-auto-test run-csv --vm "<vmx>" --mode baseline --snapshot "clean-snapshot" \
 | `test.bat` | `schtasks /query` | `powershell` |
 
 第一列以 `sample` 开头时自动识别为表头。相对路径需配合 `--samples-base-dir`。
+
+**av_analyze 模式**：CSV 仅需 1 列 `sample_file`（无需验证命令列），通过 `--mode av-analyze` 指定。
 
 ## 计划任务（交互菜单）
 
@@ -346,8 +351,8 @@ verification:
 | `BASELINE_INVALID` | FAILED — 无效 | baseline 模式验证输出未改变 |
 | `AV_NOT_BLOCKED` | FAILED — 未拦截 | AV 模式效果仍发生 |
 | `AV_BLOCKED_OR_NO_CHANGE` | SUCCESS — 已拦截 | AV 模式未观察到效果 |
-| `AV_ANALYZE_BLOCKED` | SUCCESS — 已拦截 | AV 分析模式日志有变化，杀软记录新活动 |
-| `AV_ANALYZE_NOT_BLOCKED` | FAILED — 未拦截 | AV 分析模式日志无变化，杀软未检测到威胁 |
+| `AV_ANALYZE_BLOCKED` | SUCCESS — 已拦截 | AV 分析模式日志/截图有变化，杀软记录新活动 |
+| `AV_ANALYZE_NOT_BLOCKED` | FAILED — 未拦截 | AV 分析模式日志/截图无变化，杀软未检测到威胁 |
 
 ## 报告目录
 
@@ -376,9 +381,10 @@ reports/<timestamp>-batch/
   samples/<sample_id>/
     result.json        schema_version: 2
     before.txt / after.txt
-    sample_stdout.txt / sample_stderr.txt
-    screenshot.png
-    av_logs/
+    sample_stdout.txt / sample_stderr.txt  # baseline/av 模式
+    screenshot.png                          # baseline/av 模式
+    screenshot_before.png / screenshot_after.png  # av_analyze 模式
+    av_logs/                                # av_analyze 模式
 ```
 
 ### `report` 命令
@@ -390,9 +396,9 @@ vm-auto-test report --input result.json --output report.html
 vm-auto-test report --input result.json --output result.json --format json
 ```
 
-默认 `--format html`。不重新执行 VM 测试，只读取输入 JSON 写输出文件。
+默认 `--format html`。不重新执行 VM 测试，只读取输入 JSON 写输出文件。自动检测 JSON schema：批量 JSON（含 `samples` 数组和 `mode` 字段）生成交互式批量 HTML，单样本 JSON 生成独立 HTML。
 
-批量运行自动生成的 `result.html` 包含：深蓝顶栏、统计卡片、环形进度图、判定分布面板、可排序样本表、状态标签、复制按钮、产出文件链接、下载栏、响应式布局，所有动态内容 HTML 转义。
+批量 HTML 包含：深蓝顶栏、统计卡片、环形进度图、判定分布面板、可排序样本表、状态标签、复制按钮、产出文件链接、下载栏、响应式布局。**av_analyze 模式**额外展示日志分析和图片对比列（无验证命令列），产出文件仅含 5 个核心文件。所有动态内容 HTML 转义。
 
 ## AV 日志采集
 

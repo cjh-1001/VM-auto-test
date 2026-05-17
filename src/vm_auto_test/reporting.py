@@ -10,7 +10,22 @@ from pathlib import Path
 from typing import Any
 
 from vm_auto_test.evaluator import output_hash
-from vm_auto_test.models import BatchTestResult, Classification, SampleTestResult, TestResult, VerificationSpec
+from vm_auto_test.models import (
+    AvAnalyzeResult,
+    BatchTestResult,
+    Classification,
+    CommandResult,
+    DeferredImageResult,
+    EvaluationResult,
+    GuestCredentials,
+    SampleSpec,
+    SampleTestResult,
+    Shell,
+    TestCase,
+    TestMode,
+    TestResult,
+    VerificationSpec,
+)
 from vm_auto_test.config import _sanitize_id
 
 
@@ -102,6 +117,7 @@ def to_report_dict(result: TestResult) -> dict[str, Any]:
         "av_logs": _log_dicts(result.logs),
         "steps": [asdict(step) for step in result.steps],
         "av_analyze_result": _av_analyze_dict(result.av_analyze_result),
+        "image_compare_result": _image_compare_dict(result.image_compare_result),
     }
 
 
@@ -129,6 +145,7 @@ def to_sample_report_dict(result: SampleTestResult) -> dict[str, Any]:
         "steps": [asdict(step) for step in result.steps],
         "duration_seconds": round(result.duration_seconds, 2),
         "av_analyze_result": _av_analyze_dict(result.av_analyze_result),
+        "image_compare_result": _image_compare_dict(result.image_compare_result),
     }
 
 
@@ -159,6 +176,7 @@ def to_batch_report_dict(result: BatchTestResult) -> dict[str, Any]:
                 "steps": [asdict(step) for step in sample.steps],
                 "duration_seconds": round(sample.duration_seconds, 2),
                 "av_analyze_result": _av_analyze_dict(sample.av_analyze_result),
+                "image_compare_result": _image_compare_dict(sample.image_compare_result),
             }
             for sample in result.samples
         ],
@@ -187,6 +205,7 @@ _BATCH_CSV_FIELDS = (
     "after_capture_method",
     "av_log_count",
     "av_analyze_log_found",
+    "av_analyze_image_result",
     "report_dir",
     "duration_seconds",
 )
@@ -229,6 +248,7 @@ def _batch_csv_rows(result: BatchTestResult) -> list[dict[str, Any]]:
                 "after_capture_method": sample.after.capture_method,
                 "av_log_count": len(sample.logs),
                 "av_analyze_log_found": _bool_text(sample.av_analyze_result.log_found) if sample.av_analyze_result else "",
+                "av_analyze_image_result": _image_compare_csv_text(sample.image_compare_result),
                 "report_dir": _relative_sample_report_dir(result, sample),
                 "duration_seconds": round(sample.duration_seconds, 2),
             }
@@ -258,8 +278,8 @@ _HTML_CLASS_LABELS: dict[str, str] = {
     "BASELINE_INVALID": "✗ FAILED — 无效",
     "AV_NOT_BLOCKED": "✗ FAILED — 未拦截",
     "AV_BLOCKED_OR_NO_CHANGE": "✓ SUCCESS — 已拦截",
-    "AV_ANALYZE_BLOCKED": "✓ SUCCESS — AI分析: 已拦截",
-    "AV_ANALYZE_NOT_BLOCKED": "✗ FAILED — AI分析: 未拦截",
+    "AV_ANALYZE_BLOCKED": "✓ 已拦截",
+    "AV_ANALYZE_NOT_BLOCKED": "✗ 未拦截",
 }
 
 _HTML_ROW_CLASS: dict[str, str] = {
@@ -272,7 +292,7 @@ _HTML_ROW_CLASS: dict[str, str] = {
 }
 
 
-def _write_batch_html(result: BatchTestResult, report_dir: Path) -> None:
+def _write_batch_html(result: BatchTestResult, report_dir: Path, output_path: Path | None = None) -> None:
     total = len(result.samples)
     counts = _classification_counts(result)
     pass_count, fail_count = _classify_pass_fail(counts)
@@ -305,7 +325,22 @@ def _write_batch_html(result: BatchTestResult, report_dir: Path) -> None:
     is_av_analyze = result.test_case.mode.value == "av_analyze"
     sample_rows = "\n".join(_sample_html_row(result, sample, report_dir) for sample in result.samples)
 
-    analysis_col_header = '<th data-sort="ai">AI分析 <span class="sort-arrow">⇅</span></th>' if is_av_analyze else ""
+    if is_av_analyze:
+        table_headers = """            <th data-sort="id">样本 ID <span class="sort-arrow">⇅</span></th>
+            <th data-sort="log">日志分析 <span class="sort-arrow">⇅</span></th>
+            <th data-sort="img">图片对比 <span class="sort-arrow">⇅</span></th>
+            <th data-sort="verdict">综合判定 <span class="sort-arrow">⇅</span></th>
+            <th data-sort="sc">样本命令 <span class="sort-arrow">⇅</span></th>
+            <th data-sort="dur">用时 <span class="sort-arrow">⇅</span></th>
+            <th>产出文件</th>"""
+    else:
+        table_headers = """            <th data-sort="id">样本 ID <span class="sort-arrow">⇅</span></th>
+            <th data-sort="class">判定结果 <span class="sort-arrow">⇅</span></th>
+            <th data-sort="fx">效果发生 <span class="sort-arrow">⇅</span></th>
+            <th data-sort="sc">样本命令 <span class="sort-arrow">⇅</span></th>
+            <th data-sort="vc">验证命令 <span class="sort-arrow">⇅</span></th>
+            <th data-sort="dur">用时 <span class="sort-arrow">⇅</span></th>
+            <th>产出文件</th>"""
 
     html_text = f"""<!doctype html>
 <html lang="zh-CN">
@@ -445,12 +480,15 @@ def _write_batch_html(result: BatchTestResult, report_dir: Path) -> None:
     .badge-pass .badge-dot{{background:#0d9488}}
     .badge-fail .badge-dot{{background:#e74c3c}}
 
-    /* ── AI badge ── */
-    .ai-badge{{
-      display:inline-block;max-width:180px;overflow:hidden;text-overflow:ellipsis;
-      white-space:nowrap;font-size:0.72rem;color:#6366f1;
-      background:#eef2ff;padding:0.15rem 0.5rem;border-radius:4px;cursor:default
+    /* ── Analysis tags ── */
+    .tag{{
+      display:inline-block;font-size:0.74rem;font-weight:600;
+      padding:0.18rem 0.6rem;border-radius:4px;white-space:nowrap
     }}
+    .tag-changed{{background:#fef2f2;color:#b91c1c}}
+    .tag-unchanged{{background:#f1f5f9;color:#64748b}}
+    .tag-blocked{{background:#ecfdf5;color:#0f766e}}
+    .tag-clean{{background:#f1f5f9;color:#94a3b8}}
     /* ── Effect icon ── */
     .effect-cell{{text-align:center}}
     .effect-yes{{color:#0d9488;font-weight:700;font-size:1rem}}
@@ -659,14 +697,7 @@ def _write_batch_html(result: BatchTestResult, report_dir: Path) -> None:
       <table id="sampleTable">
         <thead>
           <tr>
-            <th data-sort="id">样本 ID <span class="sort-arrow">⇅</span></th>
-            <th data-sort="class">判定结果 <span class="sort-arrow">⇅</span></th>
-            <th data-sort="fx">效果发生 <span class="sort-arrow">⇅</span></th>
-            <th data-sort="sc">样本命令 <span class="sort-arrow">⇅</span></th>
-            <th data-sort="vc">验证命令 <span class="sort-arrow">⇅</span></th>
-{analysis_col_header}
-            <th data-sort="dur">用时 <span class="sort-arrow">⇅</span></th>
-            <th>产出文件</th>
+{table_headers}
           </tr>
         </thead>
         <tbody>
@@ -719,7 +750,7 @@ def _write_batch_html(result: BatchTestResult, report_dir: Path) -> None:
         rows.forEach(function(r){{tbody.appendChild(r)}});
       }});
       function getCell(row,col){{
-        var map={{"id:0,class:1,fx:2,sc:3,vc:4" + (",ai:5,dur:6" if is_av_analyze else ",dur:5")}};
+        var map={{"id:0,class:1,fx:2,sc:3" + (",log:1,img:2,verdict:3,sc:4,dur:5" if is_av_analyze else ",vc:4,dur:5")}};
         var i=map[col]!=null?map[col]:0;
         var td=row.children[i];
         return(td?td.textContent.trim():'');
@@ -787,7 +818,8 @@ def _write_batch_html(result: BatchTestResult, report_dir: Path) -> None:
 </body>
 </html>
 """
-    (report_dir / "result.html").write_text(html_text, encoding="utf-8")
+    html_path = output_path or (report_dir / "result.html")
+    html_path.write_text(html_text, encoding="utf-8")
 
 
 def _build_ring_svg(pct: int) -> str:
@@ -859,25 +891,20 @@ def _sample_html_row(result: BatchTestResult, sample: SampleTestResult, report_d
 
     duration_str = _format_duration(sample.duration_seconds)
 
-    analysis_cell = ""
-    if is_av_analyze and sample.av_analyze_result:
-        ar = sample.av_analyze_result
-        detail = ar.log_detail or ar.screenshot_analysis or ""
-        summary = _html_escape(detail[:80] + ("…" if len(detail) > 80 else ""))
-        if summary:
-            analysis_cell = f'<td><span class="ai-badge" title="{_html_escape(detail)}">{summary}</span></td>'
-        else:
-            analysis_cell = "<td>—</td>"
-    elif is_av_analyze:
-        analysis_cell = "<td>—</td>"
+    if is_av_analyze:
+        return _av_analyze_html_row(
+            sample, row_class, relative_dir, sample_cmd, duration_str,
+            "".join(artifact_links),
+        )
+
+    verify_cell = f'<td class="cmd"><div class="cmd-wrapper"><code title="{verify_cmd}">{verify_cmd}</code><button class="btn-copy" title="复制">⎘</button></div></td>'
 
     return f"""        <tr class="{row_class}">
           <td><strong>{_html_escape(sample.sample_spec.id)}</strong></td>
           <td><span class="badge {badge_class}"><span class="badge-dot"></span>{label}</span></td>
           <td class="effect-cell">{effect_html}</td>
           <td class="cmd"><div class="cmd-wrapper"><code title="{sample_cmd}">{sample_cmd}</code><button class="btn-copy" title="复制">⎘</button></div></td>
-          <td class="cmd"><div class="cmd-wrapper"><code title="{verify_cmd}">{verify_cmd}</code><button class="btn-copy" title="复制">⎘</button></div></td>
-          {analysis_cell}
+          {verify_cell}
           <td>{duration_str}</td>
           <td><div class="artifact-links">{"".join(artifact_links)}</div></td>
         </tr>"""
@@ -915,8 +942,81 @@ def _html_link(href: str, label: str) -> str:
     return f'<a href="{_html_escape(href)}">{_html_escape(label)}</a>'
 
 
+def _html_image_compare_cell(image_compare_result: Any) -> str:
+    if image_compare_result is None:
+        return "<td>—</td>"
+    value = image_compare_result.value
+    if value is None:
+        return "<td>—</td>"
+    if value.classification.value == "AV_ANALYZE_BLOCKED":
+        return '<td><span class="tag tag-blocked">有弹窗</span></td>'
+    return '<td><span class="tag tag-clean">无明显变化</span></td>'
+
+
+def _av_analyze_html_row(
+    sample: SampleTestResult,
+    row_class: str,
+    relative_dir: str,
+    sample_cmd: str,
+    duration_str: str,
+    artifact_html: str,
+) -> str:
+    # Log column
+    log_cell = "<td>—</td>"
+    log_blocked = False
+    if sample.av_analyze_result:
+        ar = sample.av_analyze_result
+        log_blocked = ar.log_found
+        if log_blocked:
+            log_cell = '<td><span class="tag tag-blocked">检测到威胁</span></td>'
+        else:
+            log_cell = '<td><span class="tag tag-clean">未检测到</span></td>'
+
+    # Image column
+    img_cell = _html_image_compare_cell(sample.image_compare_result)
+    img_blocked = False
+    if sample.image_compare_result and sample.image_compare_result.value:
+        img_blocked = sample.image_compare_result.value.classification.value == "AV_ANALYZE_BLOCKED"
+
+    # Combined verdict (OR logic)
+    combined_blocked = log_blocked or img_blocked
+    verdict_label = "✓ 已拦截" if combined_blocked else "✗ 未拦截"
+    verdict_class = "badge-pass" if combined_blocked else "badge-fail"
+
+    # If they disagree, annotate the verdict with a tooltip
+    verdict_title = ""
+    if combined_blocked and log_blocked != img_blocked:
+        if log_blocked:
+            verdict_title = ' title="日志检测到威胁 | 图片无明显变化 → 综合判定: 已拦截 (OR)"'
+        else:
+            verdict_title = ' title="日志未检测到 | 图片有弹窗 → 综合判定: 已拦截 (OR)"'
+
+    verdict_cell = f'<td><span class="badge {verdict_class}"{verdict_title}><span class="badge-dot"></span>{verdict_label}</span></td>'
+
+    row_style = ' class="row-pass"' if combined_blocked else ' class="row-fail"'
+
+    return f"""        <tr{row_style}>
+          <td><strong>{_html_escape(sample.sample_spec.id)}</strong></td>
+          {log_cell}
+          {img_cell}
+          {verdict_cell}
+          <td class="cmd"><div class="cmd-wrapper"><code title="{sample_cmd}">{sample_cmd}</code><button class="btn-copy" title="复制">⎘</button></div></td>
+          <td>{duration_str}</td>
+          <td><div class="artifact-links">{artifact_html}</div></td>
+        </tr>"""
+
+
 def _bool_text(value: bool) -> str:
     return "true" if value else "false"
+
+
+def _image_compare_csv_text(result: Any) -> str:
+    if result is None:
+        return ""
+    value = result.value
+    if value is None:
+        return "pending"
+    return value.classification.value
 
 
 def _format_duration(seconds: float) -> str:
@@ -997,3 +1097,134 @@ def _av_analyze_dict(result: Any) -> dict[str, Any] | None:
         "screenshot_analysis": result.screenshot_analysis,
         "classification": result.classification.value,
     }
+
+
+def _image_compare_dict(result: Any) -> dict[str, Any] | None:
+    if result is None:
+        return None
+    value = result.value
+    if value is None:
+        return {"pending": True}
+    return {
+        "log_found": value.log_found,
+        "log_detail": value.log_detail,
+        "screenshot_analysis": value.screenshot_analysis,
+        "classification": value.classification.value,
+    }
+
+
+def write_batch_html_from_json(batch_json_path: Path, output_html_path: Path | None = None) -> None:
+    """Reconstruct BatchTestResult from JSON and generate rich HTML."""
+    import logging
+
+    _LOGGER = logging.getLogger(__name__)
+
+    data = json.loads(batch_json_path.read_text(encoding="utf-8-sig"))
+    report_dir = batch_json_path.parent
+
+    if data.get("schema_version") != 2 or "samples" not in data:
+        raise ValueError("Not a batch result JSON (schema_version 2 with samples)")
+
+    _dummy_creds = GuestCredentials("", "")
+    mode = TestMode(data["mode"])
+
+    samples: list[SampleTestResult] = []
+    for sd in data["samples"]:
+        relative = sd.get("report_dir", "")
+        sample_dir = report_dir / relative
+        sample_json_path = sample_dir / "result.json"
+        if not sample_json_path.exists():
+            _LOGGER.warning("Sample result.json not found: %s", sample_json_path)
+            continue
+
+        sample_json = json.loads(sample_json_path.read_text(encoding="utf-8-sig"))
+
+        before_txt = (
+            (sample_dir / "before.txt").read_text(encoding="utf-8-sig")
+            if (sample_dir / "before.txt").exists()
+            else ""
+        )
+        after_txt = (
+            (sample_dir / "after.txt").read_text(encoding="utf-8-sig")
+            if (sample_dir / "after.txt").exists()
+            else ""
+        )
+        stdout_txt = (
+            (sample_dir / "sample_stdout.txt").read_text(encoding="utf-8-sig")
+            if (sample_dir / "sample_stdout.txt").exists()
+            else ""
+        )
+        stderr_txt = (
+            (sample_dir / "sample_stderr.txt").read_text(encoding="utf-8-sig")
+            if (sample_dir / "sample_stderr.txt").exists()
+            else ""
+        )
+
+        before_cmd = sample_json.get("before", {}).get("command", "log_collect")
+        after_cmd = sample_json.get("after", {}).get("command", "log_collect")
+
+        ar_data = sample_json.get("av_analyze_result")
+        av_ar = None
+        if ar_data:
+            av_ar = AvAnalyzeResult(
+                log_found=ar_data.get("log_found", False),
+                log_detail=ar_data.get("log_detail", ""),
+                screenshot_analysis=ar_data.get("screenshot_analysis"),
+                classification=Classification(ar_data["classification"]),
+            )
+
+        ic_data = sample_json.get("image_compare_result")
+        ic_deferred = None
+        if ic_data and not ic_data.get("pending"):
+            ic_value = AvAnalyzeResult(
+                log_found=ic_data.get("log_found", False),
+                log_detail=ic_data.get("log_detail", ""),
+                screenshot_analysis=ic_data.get("screenshot_analysis"),
+                classification=Classification(ic_data["classification"]),
+            )
+            ic_deferred = DeferredImageResult(value=ic_value)
+
+        sp = SampleTestResult(
+            test_case=TestCase(
+                vm_id=data["vm_id"],
+                snapshot=data.get("snapshot"),
+                mode=mode,
+                sample_command=sd.get("sample_command", ""),
+                verify_command="",
+                credentials=_dummy_creds,
+            ),
+            sample_spec=SampleSpec(
+                id=sd["id"],
+                command=sd.get("sample_command", ""),
+            ),
+            report_dir=str(sample_dir),
+            before=CommandResult(command=before_cmd, stdout=before_txt),
+            sample=CommandResult(command="", stdout=stdout_txt, stderr=stderr_txt),
+            after=CommandResult(command=after_cmd, stdout=after_txt),
+            evaluation=EvaluationResult(
+                changed=sd.get("changed", False),
+                effect_observed=sd.get("effect_observed", False),
+            ),
+            classification=Classification(sd["classification"]),
+            duration_seconds=sd.get("duration_seconds", 0),
+            av_analyze_result=av_ar,
+            image_compare_result=ic_deferred,
+        )
+        samples.append(sp)
+
+    batch = BatchTestResult(
+        test_case=TestCase(
+            vm_id=data["vm_id"],
+            snapshot=data.get("snapshot"),
+            mode=mode,
+            sample_command="",
+            verify_command="",
+            credentials=_dummy_creds,
+        ),
+        report_dir=str(report_dir),
+        samples=tuple(samples),
+        classification=Classification(data["summary"]["overall_classification"]),
+        duration_seconds=data["summary"].get("duration_seconds", 0),
+    )
+
+    _write_batch_html(batch, report_dir, output_html_path)

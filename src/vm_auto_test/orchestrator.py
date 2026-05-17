@@ -20,6 +20,7 @@ from vm_auto_test.models import (
     BatchTestResult,
     Classification,
     CommandResult,
+    DeferredImageResult,
     EvaluationResult,
     PLAN_REPEAT_COUNT_MAX,
     PlanRunResult,
@@ -111,6 +112,7 @@ class TestOrchestrator:
         self._log_path: Path | None = None
         self._detected_av_name: str | None = None
         self._guest_username: str | None = None
+        self._pending_image_tasks: list[asyncio.Task[None]] = []
 
     async def list_snapshots(self, vm_id: str) -> list[str]:
         return await self._provider.list_snapshots(vm_id)
@@ -399,6 +401,11 @@ class TestOrchestrator:
             steps.extend(result.steps)
 
         self._stage = "结果"
+        # Await any pending image comparison background tasks
+        if self._pending_image_tasks:
+            await asyncio.gather(*self._pending_image_tasks)
+            self._pending_image_tasks.clear()
+
         classification = self._run_sync_progress_step(
             "batch_evaluate",
             "summary",
@@ -813,50 +820,68 @@ class TestOrchestrator:
         self._stage = "收集日志(after)"
         after_log_content = await self._collect_analyze_logs(test_case, report_dir, steps, suffix="after")
 
-        # Compare before vs after logs (follow AV mode pattern)
-        self._stage = "日志分析"
-        logs_changed = _normalize_log_for_comparison(after_log_content) != _normalize_log_for_comparison(before_log_content)
-        if test_case.av_analyze.api_key_env or test_case.av_analyze.analyzer_command:
-            av_analyze_result = await self._run_ai_analysis(
-                test_case.av_analyze, after_log_content,
-                Path(before_screenshot_path), Path(after_screenshot_path),
-            )
-        elif logs_changed:
-            av_analyze_result = AvAnalyzeResult(
-                log_found=True,
-                log_detail="日志有变化（与样本执行前对比），杀软记录了新活动",
-                classification=Classification.AV_ANALYZE_BLOCKED,
-            )
-        elif test_case.av_analyze.enable_image_compare:
-            self._stage = "截图对比"
-            changed, diff_pct, detail = compare_screenshots(
-                Path(before_screenshot_path), Path(after_screenshot_path),
-                test_case.av_analyze.image_compare_threshold,
-            )
-            if changed:
-                av_analyze_result = AvAnalyzeResult(
-                    log_found=False,
-                    log_detail=detail,
-                    screenshot_analysis=detail,
+        # Dual-track: log analysis (awaited) || image comparison (background)
+        has_ai = bool(test_case.av_analyze.api_key_env or test_case.av_analyze.analyzer_command)
+        do_image = has_ai or test_case.av_analyze.enable_image_compare
+
+        async def _track_log() -> AvAnalyzeResult:
+            self._stage = "日志判断"
+            if has_ai:
+                result = await self._run_ai_analysis(
+                    test_case.av_analyze, after_log_content,
+                    Path(before_screenshot_path), Path(after_screenshot_path),
+                )
+                return AvAnalyzeResult(
+                    log_found=result.log_found,
+                    log_detail=result.log_detail,
+                    classification=result.classification,
+                )
+            logs_changed = _normalize_log_for_comparison(after_log_content) != _normalize_log_for_comparison(before_log_content)
+            if logs_changed:
+                return AvAnalyzeResult(
+                    log_found=True,
+                    log_detail="日志有变化（与样本执行前对比），杀软记录了新活动",
                     classification=Classification.AV_ANALYZE_BLOCKED,
                 )
-            else:
-                av_analyze_result = AvAnalyzeResult(
-                    log_found=False,
-                    log_detail=detail,
-                    screenshot_analysis=detail,
-                    classification=Classification.AV_ANALYZE_NOT_BLOCKED,
-                )
-        else:
-            av_analyze_result = AvAnalyzeResult(
+            return AvAnalyzeResult(
                 log_found=False,
                 log_detail="日志无变化，杀软未检测到威胁",
                 classification=Classification.AV_ANALYZE_NOT_BLOCKED,
             )
-        steps.append(StepResult("log_analysis", "passed", av_analyze_result.classification.value, self._stage))
+
+        log_result = await _track_log()
+        av_analyze_result = log_result
+
+        self._stage = "日志判断"
+        self._emit("log_analysis", "passed",
+            "✓ 已拦截" if log_result.classification == Classification.AV_ANALYZE_BLOCKED
+            else "✗ 未拦截")
+        steps.append(StepResult("log_analysis", "passed", log_result.classification.value, "日志判断"))
+
+        # Fire image comparison as background task — don't block result
+        deferred_image: DeferredImageResult | None = None
+        if do_image and not has_ai:
+            deferred_image = DeferredImageResult()
+            self._pending_image_tasks.append(
+                asyncio.create_task(self._bg_image_compare(
+                    deferred_image,
+                    Path(before_screenshot_path), Path(after_screenshot_path),
+                    test_case.av_analyze.image_compare_threshold,
+                ))
+            )
+
+        # Await pending image tasks so the report has the final result
+        if self._pending_image_tasks:
+            await asyncio.gather(*self._pending_image_tasks)
+            self._pending_image_tasks.clear()
+
+        combined_blocked = log_result.classification == Classification.AV_ANALYZE_BLOCKED
+        if deferred_image is not None and deferred_image.value is not None:
+            if deferred_image.value.classification == Classification.AV_ANALYZE_BLOCKED:
+                combined_blocked = True
 
         self._stage = "验证攻击效果"
-        if av_analyze_result.classification == Classification.AV_ANALYZE_BLOCKED:
+        if combined_blocked:
             self._emit("evaluate", "passed", "✓ SUCCESS — 杀软已拦截")
         else:
             self._emit("evaluate", "passed", "✗ FAILED — 杀软未拦截")
@@ -867,12 +892,13 @@ class TestOrchestrator:
             before=CommandResult(command="log_collect", stdout=before_log_content),
             sample=sample,
             after=CommandResult(command="log_collect", stdout=after_log_content),
-            changed=av_analyze_result.classification == Classification.AV_ANALYZE_NOT_BLOCKED,
-            classification=av_analyze_result.classification,
+            changed=not combined_blocked,
+            classification=Classification.AV_ANALYZE_BLOCKED if combined_blocked else Classification.AV_ANALYZE_NOT_BLOCKED,
             steps=tuple(steps),
             evaluation=None,
             logs=(),
             av_analyze_result=av_analyze_result,
+            image_compare_result=deferred_image,
         )
 
         self._stage = "结果"
@@ -955,55 +981,81 @@ class TestOrchestrator:
         self._stage = "收集日志(after)"
         after_log_content = await self._collect_analyze_logs(test_case, report_dir, steps, suffix="after")
 
-        # Compare before vs after logs (follow AV mode pattern)
-        self._stage = "日志分析"
-        logs_changed = _normalize_log_for_comparison(after_log_content) != _normalize_log_for_comparison(before_log_content)
-        if test_case.av_analyze.api_key_env or test_case.av_analyze.analyzer_command:
-            av_analyze_result = await self._run_ai_analysis(
-                test_case.av_analyze, after_log_content,
-                Path(before_screenshot_path), Path(after_screenshot_path),
-            )
-        elif logs_changed:
-            av_analyze_result = AvAnalyzeResult(
-                log_found=True,
-                log_detail="日志有变化（与样本执行前对比），杀软记录了新活动",
-                classification=Classification.AV_ANALYZE_BLOCKED,
-            )
-        elif test_case.av_analyze.enable_image_compare:
-            self._stage = "截图对比"
-            changed, diff_pct, detail = compare_screenshots(
-                Path(before_screenshot_path), Path(after_screenshot_path),
-                test_case.av_analyze.image_compare_threshold,
-            )
-            if changed:
-                av_analyze_result = AvAnalyzeResult(
-                    log_found=False,
-                    log_detail=detail,
-                    screenshot_analysis=detail,
+        # Dual-track: log analysis || image comparison, run in parallel
+        has_ai = bool(test_case.av_analyze.api_key_env or test_case.av_analyze.analyzer_command)
+        do_image = has_ai or test_case.av_analyze.enable_image_compare
+
+        async def _track_log() -> AvAnalyzeResult:
+            self._stage = "日志判断"
+            if has_ai:
+                result = await self._run_ai_analysis(
+                    test_case.av_analyze, after_log_content,
+                    Path(before_screenshot_path), Path(after_screenshot_path),
+                )
+                return AvAnalyzeResult(
+                    log_found=result.log_found,
+                    log_detail=result.log_detail,
+                    classification=result.classification,
+                )
+            logs_changed = _normalize_log_for_comparison(after_log_content) != _normalize_log_for_comparison(before_log_content)
+            if logs_changed:
+                return AvAnalyzeResult(
+                    log_found=True,
+                    log_detail="日志有变化（与样本执行前对比），杀软记录了新活动",
                     classification=Classification.AV_ANALYZE_BLOCKED,
                 )
-            else:
-                av_analyze_result = AvAnalyzeResult(
-                    log_found=False,
-                    log_detail=detail,
-                    screenshot_analysis=detail,
-                    classification=Classification.AV_ANALYZE_NOT_BLOCKED,
-                )
-        else:
-            av_analyze_result = AvAnalyzeResult(
+            return AvAnalyzeResult(
                 log_found=False,
                 log_detail="日志无变化，杀软未检测到威胁",
                 classification=Classification.AV_ANALYZE_NOT_BLOCKED,
             )
-        steps.append(StepResult("log_analysis", "passed", av_analyze_result.classification.value, self._stage))
 
+        async def _track_image() -> AvAnalyzeResult | None:
+            if not do_image:
+                return None
+            self._stage = "截图对比"
+            if has_ai:
+                return None  # AI handles image+log together in _track_log
+            changed, diff_pct, detail = await asyncio.to_thread(
+                compare_screenshots,
+                Path(before_screenshot_path), Path(after_screenshot_path),
+                test_case.av_analyze.image_compare_threshold,
+            )
+            return AvAnalyzeResult(
+                log_found=False,
+                screenshot_analysis=detail,
+                classification=Classification.AV_ANALYZE_BLOCKED if changed else Classification.AV_ANALYZE_NOT_BLOCKED,
+            )
+
+        log_result = await _track_log()
+        av_analyze_result = log_result
+
+        self._stage = "日志判断"
+        self._emit("log_analysis", "passed",
+            "✓ 已拦截" if log_result.classification == Classification.AV_ANALYZE_BLOCKED
+            else "✗ 未拦截")
+        steps.append(StepResult("log_analysis", "passed", log_result.classification.value, "日志判断"))
+
+        # Fire image comparison as background task — don't block next sample
+        deferred_image: DeferredImageResult | None = None
+        if do_image and not has_ai:
+            deferred_image = DeferredImageResult()
+            self._pending_image_tasks.append(
+                asyncio.create_task(self._bg_image_compare(
+                    deferred_image,
+                    Path(before_screenshot_path), Path(after_screenshot_path),
+                    test_case.av_analyze.image_compare_threshold,
+                ))
+            )
+
+        # Immediate verdict based on log alone (image result fills in later)
+        combined_blocked = log_result.classification == Classification.AV_ANALYZE_BLOCKED
         self._stage = "验证攻击效果"
-        if av_analyze_result.classification == Classification.AV_ANALYZE_BLOCKED:
+        if combined_blocked:
             self._emit("evaluate", "passed", "✓ SUCCESS — 杀软已拦截")
         else:
             self._emit("evaluate", "passed", "✗ FAILED — 杀软未拦截")
 
-        logs_changed = av_analyze_result.classification == Classification.AV_ANALYZE_BLOCKED
         return SampleTestResult(
             test_case=test_case,
             sample_spec=sample,
@@ -1012,14 +1064,15 @@ class TestOrchestrator:
             sample=sample_result,
             after=CommandResult(command="log_collect", stdout=after_log_content),
             evaluation=EvaluationResult(
-                changed=logs_changed,
-                effect_observed=logs_changed,
+                changed=combined_blocked,
+                effect_observed=combined_blocked,
             ),
-            classification=av_analyze_result.classification,
+            classification=Classification.AV_ANALYZE_BLOCKED if combined_blocked else Classification.AV_ANALYZE_NOT_BLOCKED,
             steps=tuple(steps),
             logs=(),
             duration_seconds=time.monotonic() - t0,
             av_analyze_result=av_analyze_result,
+            image_compare_result=deferred_image,
         )
 
     async def _collect_analyze_logs(
@@ -1148,6 +1201,22 @@ class TestOrchestrator:
             before_screenshot,
             after_screenshot,
             report_dir,
+        )
+
+    async def _bg_image_compare(
+        self,
+        deferred: DeferredImageResult,
+        before_path: Path,
+        after_path: Path,
+        threshold: float,
+    ) -> None:
+        changed, diff_pct, detail = await asyncio.to_thread(
+            compare_screenshots, before_path, after_path, threshold,
+        )
+        deferred.value = AvAnalyzeResult(
+            log_found=False,
+            screenshot_analysis=detail,
+            classification=Classification.AV_ANALYZE_BLOCKED if changed else Classification.AV_ANALYZE_NOT_BLOCKED,
         )
 
     def _validate_test_case(self, test_case: TestCase) -> None:
