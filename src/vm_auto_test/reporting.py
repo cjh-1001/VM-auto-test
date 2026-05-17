@@ -493,6 +493,7 @@ def _write_batch_html(result: BatchTestResult, report_dir: Path, output_path: Pa
     .tag-unchanged{{background:#f1f5f9;color:#64748b}}
     .tag-blocked{{background:#ecfdf5;color:#0f766e}}
     .tag-clean{{background:#f1f5f9;color:#94a3b8}}
+    .tag-neutral-fail{{background:#fef2f2;color:#b91c1c}}
     /* ── Effect icon ── */
     .effect-cell{{text-align:center}}
     .effect-yes{{color:#0d9488;font-weight:700;font-size:1rem}}
@@ -1061,7 +1062,7 @@ def _html_image_compare_cell(image_compare_result: Any) -> str:
         return "<td>—</td>"
     if value.classification.value == "AV_ANALYZE_BLOCKED":
         return '<td><span class="tag tag-blocked">存在差异</span></td>'
-    return '<td><span class="tag tag-clean">基本相同</span></td>'
+    return '<td><span class="tag tag-neutral-fail">基本相同</span></td>'
 
 
 def _av_analyze_html_row(

@@ -14,5 +14,6 @@ credentials.json
 reports/
 *-reports/
 *.report/
+plus_plan/
 configs/*.local.yaml
 .python-version
