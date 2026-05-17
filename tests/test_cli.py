@@ -259,9 +259,10 @@ async def test_interactive_plan_menu_enqueues_csv_task(monkeypatch, capsys):
     await cli._interactive_plan_menu(provider=object())
 
     captured = capsys.readouterr()
-    assert "task-1 多样本 x1" in captured.out
+    assert "task-1 多样本" in captured.out
     assert "2 个样本" in captured.out
     assert len(seen["tasks"]) == 1
+    assert seen["tasks"][0].repeat_count == 1
     assert seen["tasks"][0].kind.value == "batch"
 
 

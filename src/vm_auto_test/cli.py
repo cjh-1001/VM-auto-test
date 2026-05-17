@@ -1312,8 +1312,9 @@ def _format_plan_task(task: PlanTask) -> str:
     kind = "单样本" if task.kind == PlanTaskKind.SINGLE else "多样本"
     sample_count = len(test_case.effective_samples())
     sample_text = test_case.sample_command if task.kind == PlanTaskKind.SINGLE else f"{sample_count} 个样本"
+    repeat_text = f" x{task.repeat_count}" if task.repeat_count > 1 else ""
     return (
-        f"{task.id} {kind} x{task.repeat_count} | "
+        f"{task.id} {kind}{repeat_text} | "
         f"VM={test_case.vm_id} | 快照={test_case.snapshot or '(无)'} | "
         f"模式={test_case.mode.value} | {sample_text}"
     )
