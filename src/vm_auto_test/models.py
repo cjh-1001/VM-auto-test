@@ -138,6 +138,11 @@ class AvAnalyzeSpec:
     analyzer_command: str = ""
     enable_image_compare: bool = False
     image_compare_threshold: float = 5.0
+    popup_classifier_enabled: bool = False
+    popup_classifier_model: str = ""
+    popup_classifier_base_url: str = ""
+    popup_classifier_api_format: str = "openai"
+    popup_classifier_verify_ssl: bool = True
 
 
 @dataclass(frozen=True)

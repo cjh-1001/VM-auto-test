@@ -16,4 +16,5 @@ reports/
 *.report/
 plus_plan/
 configs/*.local.yaml
+configs/ai_check.json
 .python-version

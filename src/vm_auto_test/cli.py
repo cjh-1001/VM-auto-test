@@ -140,6 +140,15 @@ def build_parser() -> argparse.ArgumentParser:
     run_config_parser = subparsers.add_parser("run-config", help="Run validation from a YAML config")
     run_config_parser.add_argument("config", help="YAML config file")
     run_config_parser.add_argument("--guest-password")
+
+    ai_check_parser = subparsers.add_parser("ai-check", help="AI check: re-evaluate reports with popup classifier")
+    ai_check_parser.add_argument("report_dir", help="Batch report directory path")
+    ai_check_parser.add_argument("--model", default="", help="Classifier model (default: claude-haiku-4-5)")
+    ai_check_parser.add_argument("--base-url", default="", help="Custom API base URL")
+    ai_check_parser.add_argument("--api-format", choices=("anthropic", "openai"), default="anthropic")
+    ai_check_parser.add_argument("--no-verify-ssl", action="store_true", help="Skip SSL certificate verification")
+    ai_check_parser.add_argument("--api-key-env", default="ANTHROPIC_API_KEY", help="Env var for API key")
+    ai_check_parser.add_argument("--dry-run", action="store_true", help="Check without modifying files")
     return parser
 
 
@@ -164,6 +173,17 @@ async def main_async(argv: Sequence[str] | None = None) -> int:
         )
         print(f"Report written to: {clean_cli_value(args.output)}")
         return 0
+
+    if args.command == "ai-check":
+        return await _run_ai_check(
+            Path(clean_cli_value(args.report_dir)),
+            model=args.model,
+            base_url=args.base_url,
+            api_format=args.api_format,
+            verify_ssl=not args.no_verify_ssl,
+            api_key_env=args.api_key_env,
+            dry_run=args.dry_run,
+        )
 
     if args.command == "doctor":
         return _run_doctor(
@@ -416,6 +436,66 @@ def _standalone_html_report(data: object) -> str:
     )
 
 
+async def _run_ai_check(
+    report_dir: Path,
+    *,
+    model: str = "",
+    base_url: str = "",
+    api_format: str = "anthropic",
+    verify_ssl: bool = True,
+    api_key_env: str = "ANTHROPIC_API_KEY",
+    dry_run: bool = False,
+) -> int:
+    import os
+
+    from vm_auto_test.ai_check_config import load_config
+    from vm_auto_test.commands.ai_check import run_ai_check
+
+    # Load saved config as defaults, CLI args take precedence
+    saved = load_config()
+    if not model:
+        model = saved.model
+    if not base_url:
+        base_url = saved.base_url
+    if api_format == "anthropic" and saved.api_format:
+        api_format = saved.api_format
+    if verify_ssl is True and not saved.verify_ssl:
+        verify_ssl = saved.verify_ssl
+
+    api_key = os.environ.get(api_key_env, "") or saved.api_key
+    if not api_key and not dry_run:
+        print(f"错误: 请通过 [8] AI接口配置 设置 API Key，或设置环境变量 {api_key_env}")
+        return 1
+
+    print(f"AI检查: {report_dir}")
+    if base_url:
+        print(f"  API: {base_url} ({api_format})")
+    print(f"  模型: {model or 'claude-haiku-4-5'}")
+    print()
+
+    try:
+        results, _ = await run_ai_check(
+            report_dir,
+            api_key=api_key,
+            model=model or "",
+            base_url=base_url,
+            api_format=api_format,
+            verify_ssl=verify_ssl,
+            dry_run=dry_run,
+        )
+    except FileNotFoundError as e:
+        print(f"错误: {e}")
+        return 1
+    except ValueError as e:
+        print(f"错误: {e}")
+        return 1
+    except Exception as e:
+        print(f"错误: {e}")
+        return 1
+
+    return 0
+
+
 @dataclass(frozen=True)
 class DoctorCheck:
     label: str
@@ -535,11 +615,21 @@ async def _interactive_menu(provider: VmwareProvider, env_file: Path) -> None:
         print("  [4] 列出快照")
         print("  [5] 计划任务")
         print("  [6] 重新配置环境")
+        print("  [7] AI核验报告")
+        print("  [8] AI接口配置")
         choice = input("\n  > ").strip()
 
         if choice == "0":
             print("  已退出")
             return
+
+        if choice == "8":
+            _interactive_ai_setup()
+            continue
+
+        if choice == "7":
+            await _interactive_ai_check()
+            continue
 
         if choice == "6":
             await _interactive_setup(env_file)
@@ -830,9 +920,30 @@ async def _build_interactive_av_analyze_test_case(
 
             from vm_auto_test.models import AvAnalyzeSpec
 
+            enable_img = True
+            popup_enabled = "y" in input("  AI弹窗分类器? 当截图有差异但日志无拦截时，用AI判断是否为杀软弹窗 [Y/n]: ").strip().lower() or True
+            popup_model = ""
+            popup_base_url = ""
+            popup_api_format = "openai"
+            popup_verify_ssl = True
+            if popup_enabled:
+                popup_model = input("  分类器模型 [claude-haiku-4-5]: ").strip() or ""
+                popup_base_url = input("  自定义API地址 (留空用Anthropic官方): ").strip()
+                if popup_base_url:
+                    popup_api_format = input("  API格式 [openai]: ").strip().lower() or "openai"
+                    popup_verify_ssl = "y" in input("  验证SSL证书? [Y/n]: ").strip().lower() or True
+                print(f"  弹窗分类器: 已启用 ({popup_model or 'claude-haiku-4-5'})")
+            else:
+                print("  弹窗分类器: 已禁用（将直接信任截图差异结果）")
+
             av_spec = AvAnalyzeSpec(
                 log_collect_shell=Shell.POWERSHELL,
                 enable_image_compare=enable_img,
+                popup_classifier_enabled=popup_enabled,
+                popup_classifier_model=popup_model,
+                popup_classifier_base_url=popup_base_url,
+                popup_classifier_api_format=popup_api_format,
+                popup_classifier_verify_ssl=popup_verify_ssl,
             )
             return TestCase(
                 vm_id=vm_id,
@@ -1393,6 +1504,124 @@ async def _interactive_setup(env_file: Path) -> None:
     load_env_file(env_file, override=True)
     print("\n  ✓ 配置已保存\n")
     print("  VM 独立凭证请在主菜单 [3] 列出 VM 中配置。\n")
+
+
+def _interactive_ai_setup() -> None:
+    """Configure AI check API settings and save to config file."""
+    from vm_auto_test.ai_check_config import AiCheckConfig, load_config, save_config
+
+    saved = load_config()
+    print(f"\n  ⚙ AI接口配置")
+    print(f"  配置文件: {Path(os.getenv('AI_CHECK_CONFIG_FILE', 'configs/ai_check.json'))}")
+    print("  回车保留当前值，输入新值覆盖\n")
+
+    model = _prompt_env("模型", saved.model or "claude-haiku-4-5")
+    base_url = _prompt_env("自定义 API 地址 (留空用 Anthropic 官方)", saved.base_url)
+    api_format = saved.api_format
+    verify_ssl = saved.verify_ssl
+    if base_url:
+        fmt = input(f"  API 格式  当前: {api_format}\n  新值 [openai]: ").strip().lower()
+        api_format = fmt if fmt in ("anthropic", "openai") else (api_format or "openai")
+        current_ssl = "是" if verify_ssl else "否"
+        verify_ssl = "y" in input(f"  验证 SSL 证书  当前: {current_ssl}\n  新值 [Y/n]: ").strip().lower() or True
+
+    masked = saved.api_key[:4] + "****" + saved.api_key[-4:] if len(saved.api_key) > 8 else ("****" if saved.api_key else "(未设置)")
+    new_key = input(f"  API Key  当前: {masked}\n  新值: ").strip()
+    api_key = new_key if new_key else saved.api_key
+
+    config = AiCheckConfig(
+        model=model,
+        base_url=base_url,
+        api_format=api_format,
+        verify_ssl=verify_ssl,
+        api_key=api_key,
+    )
+    path = save_config(config)
+    print(f"\n  ✓ 配置已保存到: {path}\n")
+
+
+async def _interactive_ai_check() -> None:
+    """Interactive AI check: pick a report and re-evaluate with popup classifier."""
+    from vm_auto_test.ai_check_config import load_config
+    from vm_auto_test.commands.ai_check import run_ai_check
+
+    config = load_config()
+    api_key = config.api_key
+
+    reports_dir = Path("reports")
+    if not reports_dir.exists():
+        print("  reports/ 目录不存在，请先运行测试")
+        return
+
+    # List batch report directories
+    dirs = sorted(
+        [d for d in reports_dir.iterdir() if d.is_dir() and (d / "result.json").exists()],
+        reverse=True,
+    )
+    if not dirs:
+        print("  没有找到已完成报告")
+        return
+
+    print("\n  —— 选择报告 ——")
+    print("  [0] 返回")
+    for i, d in enumerate(dirs, 1):
+        try:
+            batch = json.loads((d / "result.json").read_text(encoding="utf-8-sig"))
+            mode = batch.get("mode", "?")
+            total = batch.get("summary", {}).get("total", batch.get("samples", []) and len(batch["samples"]) or "?")
+            print(f"  [{i}] {d.name}  ({mode}, {total} 样本)")
+        except Exception:
+            print(f"  [{i}] {d.name}")
+    choice = input("\n  > ").strip()
+    if choice == "0" or not choice:
+        return
+    try:
+        idx = int(choice) - 1
+        if idx < 0 or idx >= len(dirs):
+            print("  无效选项")
+            return
+    except ValueError:
+        print("  无效选项")
+        return
+
+    report_dir = dirs[idx]
+    print(f"\n  选择: {report_dir.name}")
+
+    # Show current config
+    if config.base_url:
+        print(f"  API: {config.base_url} ({config.api_format}, SSL={'✓' if config.verify_ssl else '✗'})")
+    else:
+        print(f"  API: Anthropic 官方")
+    print(f"  模型: {config.model or 'claude-haiku-4-5'}")
+
+    if api_key:
+        masked = api_key[:4] + "****" + api_key[-4:] if len(api_key) > 8 else "****"
+        print(f"  API Key: {masked} (来自配置文件)")
+    else:
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+        if api_key:
+            print(f"  API Key: 来自环境变量 ANTHROPIC_API_KEY")
+        else:
+            print(f"  ⚠ 未找到 API Key")
+            base_url_input = input("  请输入 API Key: ").strip()
+            if not base_url_input:
+                print("  已取消")
+                return
+            api_key = base_url_input
+
+    print()
+    try:
+        await run_ai_check(
+            report_dir,
+            api_key=api_key,
+            model=config.model,
+            base_url=config.base_url,
+            api_format=config.api_format,
+            verify_ssl=config.verify_ssl,
+            dry_run=False,
+        )
+    except Exception as e:
+        print(f"  错误: {e}")
 
 
 def _prompt_env(label: str, current: str | None) -> str:

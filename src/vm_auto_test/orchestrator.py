@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 import time
 from dataclasses import replace
@@ -12,6 +13,7 @@ from collections.abc import Sequence
 from typing import TypeVar
 
 from vm_auto_test.analysis import compare_screenshots, run_analysis
+from vm_auto_test.popup_classifier import PopupClassification, classify_popup, _DEFAULT_MODEL
 from vm_auto_test.av_detection import build_detection_command, parse_detection_result
 from vm_auto_test.av_logs import collect_av_logs
 from vm_auto_test.evaluator import classify_result, evaluate_output
@@ -407,7 +409,8 @@ class TestOrchestrator:
             await asyncio.gather(*self._pending_image_tasks)
             self._pending_image_tasks.clear()
 
-        # Reconcile image compare results: image blocked → overall blocked
+        # Reconcile image compare results: when log=NOT_BLOCKED and image=BLOCKED,
+        # consult AI popup classifier; only upgrade to BLOCKED if AI confirms AV popup.
         reconciled: list[SampleTestResult] = []
         for sr in sample_results:
             ic = sr.image_compare_result
@@ -417,13 +420,33 @@ class TestOrchestrator:
                 and ic.value is not None
                 and ic.value.classification == Classification.AV_ANALYZE_BLOCKED
             ):
-                reconciled.append(
-                    replace(
-                        sr,
-                        classification=Classification.AV_ANALYZE_BLOCKED,
-                        evaluation=EvaluationResult(changed=False, effect_observed=False),
-                    )
+                before_path = str(Path(sr.report_dir) / "screenshot_before.png")
+                after_path = str(Path(sr.report_dir) / "screenshot_after.png")
+                popup = await self._classify_popup(
+                    sr.test_case, before_path, after_path,
+                    ic.value.screenshot_analysis or "",
                 )
+                if popup is not None and popup.has_popup and popup.popup_kind in ("av_alert", "windows_defender"):
+                    _LOGGER.info("AI classifier confirmed AV popup for %s: %s", sr.sample_spec.id, popup.popup_text)
+                    reconciled.append(
+                        replace(
+                            sr,
+                            classification=Classification.AV_ANALYZE_BLOCKED,
+                            evaluation=EvaluationResult(changed=False, effect_observed=False),
+                        )
+                    )
+                elif popup is not None:
+                    _LOGGER.info("AI classifier overrode image BLOCKED → NOT_BLOCKED for %s: %s", sr.sample_spec.id, popup.reason)
+                    reconciled.append(sr)
+                else:
+                    _LOGGER.info("Popup classifier skipped for %s, image BLOCKED stands", sr.sample_spec.id)
+                    reconciled.append(
+                        replace(
+                            sr,
+                            classification=Classification.AV_ANALYZE_BLOCKED,
+                            evaluation=EvaluationResult(changed=False, effect_observed=False),
+                        )
+                    )
             else:
                 reconciled.append(sr)
         sample_results = reconciled
@@ -898,9 +921,20 @@ class TestOrchestrator:
             self._pending_image_tasks.clear()
 
         combined_blocked = log_result.classification == Classification.AV_ANALYZE_BLOCKED
-        if deferred_image is not None and deferred_image.value is not None:
+        if not combined_blocked and deferred_image is not None and deferred_image.value is not None:
             if deferred_image.value.classification == Classification.AV_ANALYZE_BLOCKED:
-                combined_blocked = True
+                popup = await self._classify_popup(
+                    test_case, before_screenshot_path, after_screenshot_path,
+                    deferred_image.value.screenshot_analysis or "",
+                )
+                if popup is not None and popup.has_popup and popup.popup_kind in ("av_alert", "windows_defender"):
+                    combined_blocked = True
+                    _LOGGER.info("AI classifier confirmed AV popup: %s (confidence %.0f%%)", popup.popup_text, popup.confidence * 100)
+                elif popup is not None:
+                    _LOGGER.info("AI classifier overrode image BLOCKED → NOT_BLOCKED: %s", popup.reason)
+                else:
+                    combined_blocked = True
+                    _LOGGER.info("Popup classifier skipped (not configured), image BLOCKED stands")
 
         self._stage = "验证攻击效果"
         if combined_blocked:
@@ -1239,6 +1273,28 @@ class TestOrchestrator:
             log_found=False,
             screenshot_analysis=detail,
             classification=Classification.AV_ANALYZE_BLOCKED if changed else Classification.AV_ANALYZE_NOT_BLOCKED,
+        )
+
+    async def _classify_popup(
+        self,
+        test_case: TestCase,
+        before_path: str,
+        after_path: str,
+        diff_summary: str,
+    ) -> PopupClassification | None:
+        config = test_case.av_analyze
+        if config is None or not config.popup_classifier_enabled:
+            return None
+        api_key = os.environ.get(config.api_key_env or "ANTHROPIC_API_KEY", "")
+        if not api_key:
+            _LOGGER.warning("Popup classifier enabled but no API key in %s", config.api_key_env or "ANTHROPIC_API_KEY")
+            return None
+        return await classify_popup(
+            Path(before_path), Path(after_path), diff_summary, api_key,
+            model=config.popup_classifier_model or _DEFAULT_MODEL,
+            base_url=config.popup_classifier_base_url or None,
+            api_format=config.popup_classifier_api_format or "openai",
+            verify_ssl=config.popup_classifier_verify_ssl,
         )
 
     def _validate_test_case(self, test_case: TestCase) -> None:

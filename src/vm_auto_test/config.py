@@ -95,6 +95,11 @@ class AvAnalyzeConfig:
     analyzer_command: str = ""
     enable_image_compare: bool = False
     image_compare_threshold: float = 5.0
+    popup_classifier_enabled: bool = False
+    popup_classifier_model: str = ""
+    popup_classifier_base_url: str = ""
+    popup_classifier_api_format: str = "openai"
+    popup_classifier_verify_ssl: bool = True
 
 
 @dataclass(frozen=True)
@@ -417,6 +422,11 @@ def _parse_av_analyze(value: Any) -> AvAnalyzeConfig | None:
         analyzer_command=_optional_string(value, "analyzer_command") or "",
         enable_image_compare=bool(value.get("enable_image_compare", False)),
         image_compare_threshold=float(value.get("image_compare_threshold", 5.0)),
+        popup_classifier_enabled=bool(value.get("popup_classifier_enabled", False)),
+        popup_classifier_model=_optional_string(value, "popup_classifier_model") or "",
+        popup_classifier_base_url=_optional_string(value, "popup_classifier_base_url") or "",
+        popup_classifier_api_format=_optional_string(value, "popup_classifier_api_format") or "openai",
+        popup_classifier_verify_ssl=bool(value.get("popup_classifier_verify_ssl", True)),
     )
 
 
@@ -437,6 +447,11 @@ def _to_av_analyze_spec(config: AvAnalyzeConfig | None) -> AvAnalyzeSpec | None:
         analyzer_command=config.analyzer_command,
         enable_image_compare=config.enable_image_compare,
         image_compare_threshold=config.image_compare_threshold,
+        popup_classifier_enabled=config.popup_classifier_enabled,
+        popup_classifier_model=config.popup_classifier_model,
+        popup_classifier_base_url=config.popup_classifier_base_url,
+        popup_classifier_api_format=config.popup_classifier_api_format,
+        popup_classifier_verify_ssl=config.popup_classifier_verify_ssl,
     )
 
 
@@ -507,6 +522,16 @@ def _av_analyze_to_yaml(config: AvAnalyzeConfig) -> dict[str, Any]:
     if config.enable_image_compare:
         data["enable_image_compare"] = True
         data["image_compare_threshold"] = config.image_compare_threshold
+    if config.popup_classifier_enabled:
+        data["popup_classifier_enabled"] = True
+        if config.popup_classifier_model:
+            data["popup_classifier_model"] = config.popup_classifier_model
+        if config.popup_classifier_base_url:
+            data["popup_classifier_base_url"] = config.popup_classifier_base_url
+        if config.popup_classifier_api_format:
+            data["popup_classifier_api_format"] = config.popup_classifier_api_format
+        if not config.popup_classifier_verify_ssl:
+            data["popup_classifier_verify_ssl"] = False
     return data
 
 
